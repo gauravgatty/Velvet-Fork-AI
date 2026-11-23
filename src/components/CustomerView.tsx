@@ -3,17 +3,28 @@ import { useApp } from '../context/AppContext';
 import { CartItem, MenuItem, Order } from '../types';
 import { HOTEL_INFO } from '../mockData';
 import { MockPayment } from './MockPayment';
-import { AiDiningAssistant } from './ai/AiDiningAssistant';
+import { RestaurantHomePage } from './RestaurantHomePage';
+import { AiDiningAssistant } from './AiDiningAssistant';
+import { RestaurantLogo } from './RestaurantLogo';
+
 import { 
   Search, Plus, Minus, ShoppingBag, Info, Clock, 
   Phone, MapPin, Coffee, Utensils, X, ChevronRight, 
-  CreditCard, Sparkles, AlertCircle, CheckCircle 
+  CreditCard, Sparkles, AlertCircle, CheckCircle, Heart
 } from 'lucide-react';
 import QRCode from 'qrcode';
 
-
 export const CustomerView: React.FC = () => {
-  const { menu, sections, orders, placeOrder, requestBill, settleBill, isCloudSync } = useApp();
+  const { 
+    menu, 
+    sections, 
+    orders, 
+    tableSessions,
+    placeOrderRound, 
+    requestBillForSession, 
+    settleSessionBill, 
+    getActiveSession 
+  } = useApp();
   
   // Ref for landing screen QR code canvas
   const landingQrCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -25,6 +36,7 @@ export const CustomerView: React.FC = () => {
   // If no table/section selected in URL, let them select one (Mock Scan)
   const [tempSection, setTempSection] = useState('');
   const [tempTable, setTempTable] = useState('');
+
 
   // Cart state
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -95,6 +107,7 @@ export const CustomerView: React.FC = () => {
       setSectionName(tempSection);
       setTableId(tempTable);
       
+      // Update URL without refreshing page
       const newUrl = `${window.location.origin}${window.location.pathname}?section=${encodeURIComponent(tempSection)}&table=${encodeURIComponent(tempTable)}`;
       window.history.pushState({ path: newUrl }, '', newUrl);
     }
@@ -107,6 +120,7 @@ export const CustomerView: React.FC = () => {
     return table ? `${sectionName} - ${table.name}` : `${sectionName} - ${tableId}`;
   };
 
+  // Add to cart logic
   const addToCart = (item: MenuItem) => {
     setCart(prevCart => {
       const existing = prevCart.find(i => i.menuItem.id === item.id);
@@ -134,130 +148,237 @@ export const CustomerView: React.FC = () => {
   const getCartCount = () => cart.reduce((sum, item) => sum + item.quantity, 0);
   const getCartTotal = () => cart.reduce((sum, item) => sum + (item.menuItem.price * item.quantity), 0);
 
-  const handleCheckout = () => {
-    if (cart.length === 0) return;
-    setShowPayment(true);
-  };
+  // 1. Instant Customer-Friendly Order ("Send to Kitchen" - Order Anytime Without Upfront Pay)
+  const handleSendToKitchen = async () => {
+    if (!tableId || !sectionName || cart.length === 0) return;
 
-  const handlePaymentSuccess = (method: 'UPI' | 'Card') => {
-    if (!tableId || !sectionName) return;
-    
     const finalCart = cart.map(item => ({
       ...item,
       notes: cartNotes
     }));
 
-    placeOrder(tableId, sectionName, finalCart);
-    
+    await placeOrderRound(tableId, sectionName, finalCart, cartNotes);
+
+    // Reset current round cart
+    setCart([]);
+    setCartNotes('');
+    setIsCartOpen(false);
+  };
+
+  // 2. Settle the Bill Once at the End of the Dining Session
+  const handlePaymentSuccess = async (method: 'UPI' | 'Card') => {
+    if (!tableId || !sectionName) return;
+    const currentSession = getActiveSession(tableId, sectionName);
+
+    if (currentSession) {
+      await settleSessionBill(currentSession.sessionId, method);
+    } else if (activeOrder) {
+      // Fallback for single order
+      await settleSessionBill(activeOrder.sessionId || activeOrder.id, method);
+    }
+
     setCart([]);
     setCartNotes('');
     setIsCartOpen(false);
     setShowPayment(false);
   };
 
+  // Filter menu items
   const filteredMenu = menu.filter(item => {
     if (!item.isAvailable) return false;
     const matchesSearch = item.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
                           item.description.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesCategory = activeCategory === 'All' || item.category === activeCategory;
+    
+    const matchesCategory = activeCategory === 'All' || 
+      (activeCategory === 'Appetizers' && (item.category === 'Appetizers' || item.category === 'Starters')) ||
+      (activeCategory === 'Mains' && (item.category === 'Mains' || item.category === 'Main Course' || item.category === 'Chef Specials')) ||
+      (activeCategory === 'Biryani & Grills' && (item.category === 'Rice & Biryanis' || item.category === 'Tandoori & Grills')) ||
+      (activeCategory === 'Desserts' && item.category === 'Desserts') ||
+      (activeCategory === 'Beverages' && item.category === 'Beverages') ||
+      item.category === activeCategory;
+
     const matchesVeg = !vegOnly || item.isVeg;
     return matchesSearch && matchesCategory && matchesVeg;
   });
 
-  const categories = ['All', 'Starters', 'Rice & Biryanis', 'Tandoori & Grills', 'Chef Specials', 'Main Course', 'Desserts', 'Beverages'];
+  const categories = ['All', 'Appetizers', 'Mains', 'Biryani & Grills', 'Desserts', 'Beverages'];
 
-
-
+  // Authentic Restaurant Home Page (No QR Card)
   if (!tableId || !sectionName) {
     return (
-      <div style={styles.qrScanContainer}>
-        <div style={styles.qrScanCard} className="animate-scale-in">
-          <div style={styles.qrIconWrapper}>
-            <Utensils size={40} color="#ea580c" />
-          </div>
-          <h1 style={styles.scanTitle}>{HOTEL_INFO.name}</h1>
-          <p style={styles.scanSubtitle}>Digital Dining Experience</p>
-          
-          <div style={styles.qrBox}>
-            <div style={styles.qrScanLine}></div>
-            <canvas ref={landingQrCanvasRef} style={{ display: 'block', borderRadius: '8px' }}></canvas>
-          </div>
-          
-          <p style={styles.scanHint}>Please scan a table QR code to view the menu and order. Or simulate a table scan below:</p>
-
-          <form onSubmit={handleMockScan} style={styles.scanForm}>
-            <div style={styles.formGroup}>
-              <label style={styles.formLabel}>Select Dining Section</label>
-              <select 
-                value={tempSection} 
-                onChange={(e) => {
-                  setTempSection(e.target.value);
-                  setTempTable('');
-                }}
-                required
-                style={styles.select}
-              >
-                <option value="">-- Choose Section --</option>
-                {sections.map(s => (
-                  <option key={s.name} value={s.name}>{s.name}</option>
-                ))}
-              </select>
-            </div>
-
-            {tempSection && (
-              <div style={styles.formGroup}>
-                <label style={styles.formLabel}>Select Table Number</label>
-                <select 
-                  value={tempTable} 
-                  onChange={(e) => setTempTable(e.target.value)}
-                  required
-                  style={styles.select}
-                >
-                  <option value="">-- Choose Table --</option>
-                  {sections.find(s => s.name === tempSection)?.tables.map(t => (
-                    <option key={t.id} value={t.id}>{t.name} (Status: {t.status})</option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            <button type="submit" disabled={!tempTable} style={styles.scanSubmitBtn} className="shine-btn">
-              Open Digital Menu
-            </button>
-          </form>
-        </div>
-      </div>
+      <RestaurantHomePage 
+        sections={sections}
+        menu={menu}
+        onSelectTable={(sec, tbl) => {
+          const newUrl = `${window.location.origin}${window.location.pathname}?section=${encodeURIComponent(sec)}&table=${encodeURIComponent(tbl)}`;
+          window.history.pushState({}, '', newUrl);
+          setSectionName(sec);
+          setTableId(tbl);
+        }}
+        onBrowseMenu={() => {
+          if (sections.length > 0 && sections[0].tables.length > 0) {
+            const sec = sections[0].name;
+            const tbl = sections[0].tables[0].id;
+            const newUrl = `${window.location.origin}${window.location.pathname}?section=${encodeURIComponent(sec)}&table=${encodeURIComponent(tbl)}`;
+            window.history.pushState({}, '', newUrl);
+            setSectionName(sec);
+            setTableId(tbl);
+          }
+        }}
+      />
     );
   }
 
+
   return (
     <div className="customer-layout">
-      {/* Top Welcome Header */}
+      {/* Animated Glowing Ambient Orbs Background */}
+      <div className="orb-bg-container">
+        <div className="glow-orb orb-orange" />
+        <div className="glow-orb orb-rose" />
+        <div className="glow-orb orb-purple" />
+        <div className="glow-orb orb-amber" />
+      </div>
+
+      {/* Full Prominent Luxury Header */}
       <header style={styles.header}>
         <div style={styles.headerTop}>
-          <div>
+          <div 
+            onClick={() => {
+              const newUrl = `${window.location.origin}${window.location.pathname}`;
+              window.history.pushState({}, '', newUrl);
+              setTableId(null);
+              setSectionName(null);
+            }}
+            style={styles.brandClickable}
+            title="Click to return to Home Page"
+          >
+            <div style={styles.headerLogoWrapper}>
+              <RestaurantLogo size={52} />
+            </div>
             <h1 style={styles.hotelTitle}>{HOTEL_INFO.name}</h1>
-            <p style={styles.tableBadge}>{getTableName()}</p>
-          </div>
-          <div style={styles.hotelStatus}>
-            <Sparkles size={16} color="#eab308" />
-            <span style={{ fontSize: '11px', fontWeight: 600, color: '#b45309' }}>
-              {isCloudSync ? "Live Cloud Sync" : "Contactless Dining"}
-            </span>
+            <p style={styles.hotelSubTagline}>{HOTEL_INFO.tagline.toUpperCase()}</p>
           </div>
         </div>
       </header>
 
-      {/* Main Content */}
+
+      {/* Main Container */}
       <div style={styles.mainContent}>
         
-        {/* Active Order Tracker */}
+        {/* Running Tab & Joint Table Dining Banner */}
+        {tableId && sectionName && (
+          <div style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px',
+            backgroundColor: 'rgba(24, 24, 27, 0.85)',
+            border: '1px solid rgba(245, 158, 11, 0.35)',
+            borderRadius: '16px',
+            padding: '14px 20px',
+            marginBottom: '16px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{
+                backgroundColor: 'rgba(234, 88, 12, 0.15)',
+                border: '1px solid #ea580c',
+                borderRadius: '50%',
+                width: '38px',
+                height: '38px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}>
+                <Utensils size={18} color="#ea580c" />
+              </div>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <h4 style={{ fontSize: '15px', fontWeight: 700, color: '#fafafa', margin: 0 }}>
+                    {getTableName()}
+                  </h4>
+                  {getActiveSession(tableId, sectionName)?.joinedTableIds && getActiveSession(tableId, sectionName)!.joinedTableIds!.length > 0 && (
+                    <span style={{
+                      backgroundColor: 'rgba(16, 185, 129, 0.15)',
+                      border: '1px solid #10b981',
+                      color: '#10b981',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      padding: '2px 8px',
+                      borderRadius: '12px'
+                    }}>
+                      👥 Joint Table with {getActiveSession(tableId, sectionName)!.joinedTableIds!.join(', ')}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* If table has active running tab */}
+            {getActiveSession(tableId, sectionName) && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <div style={{ textAlign: 'right' }}>
+                  <span style={{ fontSize: '11px', color: '#a1a1aa', display: 'block' }}>
+                    {getActiveSession(tableId, sectionName)!.rounds.length} Round{getActiveSession(tableId, sectionName)!.rounds.length > 1 ? 's' : ''} Ordered
+                  </span>
+                  <span style={{ fontSize: '16px', fontWeight: 800, color: '#ea580c' }}>
+                    Total: ₹{(getActiveSession(tableId, sectionName)!.subtotal * 1.05).toFixed(2)}
+                  </span>
+                </div>
+
+                {!getActiveSession(tableId, sectionName)!.status.includes('billing') ? (
+                  <button
+                    onClick={() => requestBillForSession(tableId, sectionName)}
+                    style={{
+                      backgroundColor: '#ea580c',
+                      color: '#ffffff',
+                      border: 'none',
+                      borderRadius: '10px',
+                      padding: '8px 16px',
+                      fontSize: '13px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      boxShadow: '0 4px 12px rgba(234, 88, 12, 0.3)'
+                    }}
+                  >
+                    Request Bill & Pay
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setCart([]);
+                      setShowPayment(true);
+                    }}
+                    style={{
+                      backgroundColor: '#10b981',
+                      color: '#ffffff',
+                      border: 'none',
+                      borderRadius: '10px',
+                      padding: '8px 16px',
+                      fontSize: '13px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      boxShadow: '0 4px 12px rgba(16, 185, 129, 0.3)'
+                    }}
+                  >
+                    Pay ₹{(getActiveSession(tableId, sectionName)!.subtotal * 1.05).toFixed(2)} Now
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Active Order Tracker (Latest Kitchen Round) */}
         {activeOrder && (
           <div style={styles.trackerCard} className="animate-slide-up">
             <div style={styles.trackerHeader}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <Clock size={18} color="#ea580c" />
-                <h3 style={styles.trackerTitle}>Current Order Status</h3>
+                <h3 style={styles.trackerTitle}>
+                  Latest Order Status {activeOrder.roundNumber ? `(Round #${activeOrder.roundNumber})` : ''}
+                </h3>
               </div>
               <span style={{ ...styles.statusBadge, ...statusStyles[activeOrder.status] }}>
                 {activeOrder.status}
@@ -296,21 +417,21 @@ export const CustomerView: React.FC = () => {
             </div>
 
             <div style={styles.trackerFooter}>
-              <p style={styles.orderIdText}>Order ID: {activeOrder.id.toUpperCase()}</p>
+              <p style={styles.orderIdText}>Ticket: {activeOrder.id.toUpperCase()}</p>
               
-              {activeOrder.status === 'ready' && !activeOrder.billingRequested && (
+              {!getActiveSession(tableId || '', sectionName || '')?.status.includes('billing') && (
                 <button 
-                  onClick={() => requestBill(tableId, sectionName)} 
+                  onClick={() => requestBillForSession(tableId!, sectionName!)} 
                   style={styles.requestBillBtn}
                 >
-                  Request Bill
+                  Request Final Bill
                 </button>
               )}
 
-              {activeOrder.billingRequested && (
+              {getActiveSession(tableId || '', sectionName || '')?.status === 'billing_requested' && (
                 <div style={styles.billingAlert}>
                   <AlertCircle size={16} color="#d97706" />
-                  <span>Waiter will arrive shortly with the bill. Or pay below:</span>
+                  <span>Waiter will arrive shortly with the bill. Or pay online below:</span>
                   <button 
                     onClick={() => {
                       setCart([]);
@@ -318,7 +439,7 @@ export const CustomerView: React.FC = () => {
                     }}
                     style={styles.payNowBtn}
                   >
-                    Pay ₹{activeOrder.totalAmount} Online
+                    Pay ₹{((getActiveSession(tableId || '', sectionName || '')?.subtotal || activeOrder.totalAmount) * 1.05).toFixed(2)} Once
                   </button>
                 </div>
               )}
@@ -326,33 +447,7 @@ export const CustomerView: React.FC = () => {
           </div>
         )}
 
-        {/* About Hotel info collapsible */}
-        <details style={styles.aboutDetails} className="glass-panel">
-          <summary style={styles.aboutSummary}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Info size={16} color="#ea580c" />
-              <span style={{ fontWeight: 600, fontSize: '14px' }}>About The Velvet Fork</span>
-            </div>
-            <ChevronRight size={16} style={styles.chevron} />
-          </summary>
-          <div style={styles.aboutContent}>
-            <p style={styles.aboutDesc}>{HOTEL_INFO.description}</p>
-            <div style={styles.aboutMetaGrid}>
-              <div style={styles.aboutMetaItem}>
-                <Clock size={14} color="#78716c" />
-                <span>{HOTEL_INFO.timings}</span>
-              </div>
-              <div style={styles.aboutMetaItem}>
-                <Phone size={14} color="#78716c" />
-                <span>{HOTEL_INFO.phone}</span>
-              </div>
-              <div style={styles.aboutMetaItem}>
-                <MapPin size={14} color="#78716c" />
-                <span>{HOTEL_INFO.address}</span>
-              </div>
-            </div>
-          </div>
-        </details>
+
 
         {/* Search & Filter Bar */}
         <div style={styles.filterSection}>
@@ -371,6 +466,7 @@ export const CustomerView: React.FC = () => {
           </div>
 
           <div style={styles.filterRow}>
+            {/* Category horizontal scroll */}
             <div style={styles.categoriesScroll}>
               {categories.map(cat => (
                 <button
@@ -386,6 +482,7 @@ export const CustomerView: React.FC = () => {
               ))}
             </div>
 
+            {/* Veg Switch */}
             <button 
               onClick={() => setVegOnly(!vegOnly)}
               style={{
@@ -408,15 +505,7 @@ export const CustomerView: React.FC = () => {
               return (
                 <div key={item.id} style={styles.menuCard} className="animate-scale-in">
                   <div style={styles.cardImageWrapper}>
-                    <img 
-                      src={item.image} 
-                      alt={item.name} 
-                      style={styles.cardImage} 
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).src = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=800&q=80";
-                      }}
-                    />
-
+                    <img src={item.image} alt={item.name} style={styles.cardImage} />
                     <span style={item.isVeg ? styles.vegBadge : styles.nonVegBadge}>
                       {item.isVeg ? 'Veg' : 'Non-Veg'}
                     </span>
@@ -457,6 +546,16 @@ export const CustomerView: React.FC = () => {
             </div>
           )}
         </div>
+
+        {/* Footer Credit */}
+        <footer style={{ marginTop: '40px', padding: '24px 0', borderTop: '1px solid rgba(255, 255, 255, 0.08)', textAlign: 'center' }}>
+          <p style={{ fontSize: '12px', color: '#71717a' }}>
+            © {new Date().getFullYear()} {HOTEL_INFO.name}. All Rights Reserved.
+          </p>
+          <p style={{ marginTop: '6px', fontSize: '13px', color: '#a1a1aa', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+            Made with <Heart size={14} color="#ef4444" fill="#ef4444" /> by <strong style={{ color: '#f59e0b', fontWeight: 700 }}>Gaurav Gatty</strong> and <strong style={{ color: '#f59e0b', fontWeight: 700 }}>Dheeraj</strong>
+          </p>
+        </footer>
       </div>
 
       {/* Sticky Bottom Cart Bar */}
@@ -546,32 +645,34 @@ export const CustomerView: React.FC = () => {
             </div>
 
             <div style={styles.drawerFooter}>
-              <button onClick={handleCheckout} style={styles.checkoutBtn} className="shine-btn">
-                <CreditCard size={18} /> Pay & Place Order (₹{(getCartTotal() * 1.05).toFixed(2)})
+              <button onClick={handleSendToKitchen} style={styles.checkoutBtn} className="shine-btn">
+                <Utensils size={18} /> Send to Kitchen (Add to Tab: ₹{(getCartTotal() * 1.05).toFixed(2)})
               </button>
+              <p style={{ textAlign: 'center', fontSize: '11px', color: '#78716c', marginTop: '6px' }}>
+                ✨ Pay once at the end of dining via Cash, UPI, or Card
+              </p>
             </div>
           </div>
         </div>
       )}
 
-      {/* Online Mock Payment Gateway Modal */}
+      {/* Online Mock Payment Gateway Modal (Pay Once for the entire dining tab) */}
       {showPayment && (
         <MockPayment
-          amount={activeOrder ? activeOrder.totalAmount : getCartTotal() * 1.05}
+          amount={
+            tableId && sectionName && getActiveSession(tableId, sectionName)
+              ? (getActiveSession(tableId, sectionName)!.subtotal * 1.05)
+              : (activeOrder ? activeOrder.totalAmount * 1.05 : getCartTotal() * 1.05)
+          }
           onClose={() => setShowPayment(false)}
           onPaymentSuccess={(method) => {
-            if (activeOrder) {
-              settleBill(activeOrder.id, method);
-              setShowPayment(false);
-            } else {
-              handlePaymentSuccess(method);
-            }
+            handlePaymentSuccess(method);
           }}
         />
       )}
 
-      {/* Floating Gemini AI Assistant */}
-      <AiDiningAssistant cart={cart} onAddToCart={addToCart} />
+      {/* Floating AI Dining Assistant Widget */}
+      <AiDiningAssistant menu={menu} cart={cart} onAddToCart={addToCart} />
     </div>
   );
 };
@@ -693,32 +794,71 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: '0 4px 12px rgba(234, 88, 12, 0.2)',
   },
   header: {
-    backgroundColor: '#ffffff',
-    borderBottom: '1px solid #e7e5e4',
-    padding: '16px 20px',
+    backgroundColor: 'rgba(15, 15, 18, 0.90)',
+    backdropFilter: 'blur(16px)',
+    borderBottom: '1px solid rgba(245, 158, 11, 0.25)',
+    padding: '24px 20px',
     position: 'sticky',
     top: 0,
     zIndex: 100,
+    boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.5)',
+    width: '100%',
   },
   headerTop: {
     display: 'flex',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
     alignItems: 'center',
+    width: '100%',
+    textAlign: 'center',
+    maxWidth: '1200px',
+    margin: '0 auto',
+  },
+  brandClickable: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    textAlign: 'center',
+    cursor: 'pointer',
+    gap: '4px',
+    width: '100%',
+  },
+  headerLogoWrapper: {
+    marginBottom: '2px',
+    transform: 'scale(1.15)',
   },
   hotelTitle: {
     fontFamily: 'var(--font-serif)',
-    fontSize: '22px',
-    fontWeight: 700,
+    fontSize: 'clamp(28px, 5vw, 48px)',
+    fontWeight: 900,
+    letterSpacing: '3px',
+    textTransform: 'uppercase',
+    background: 'linear-gradient(135deg, #ffffff 0%, #f59e0b 50%, #ea580c 100%)',
+    WebkitBackgroundClip: 'text',
+    WebkitTextFillColor: 'transparent',
+    margin: '6px 0 2px 0',
+    width: '100%',
+    lineHeight: '1.05',
+    textShadow: '0 0 30px rgba(245, 158, 11, 0.25)',
   },
-  tableBadge: {
-    fontSize: '12px',
-    color: '#ea580c',
+  hotelSubTagline: {
+    fontSize: '11px',
+    letterSpacing: '5px',
+    color: '#f59e0b',
+    fontWeight: 700,
+    margin: '0 0 8px 0',
+  },
+  tableLocationPill: {
+    fontSize: '11px',
+    color: '#f59e0b',
     fontWeight: 600,
-    backgroundColor: '#ffedd5',
-    padding: '2px 8px',
-    borderRadius: '6px',
-    display: 'inline-block',
-    marginTop: '2px',
+    backgroundColor: 'rgba(245, 158, 11, 0.12)',
+    border: '1px solid rgba(245, 158, 11, 0.3)',
+    padding: '4px 14px',
+    borderRadius: '20px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
   },
   hotelStatus: {
     display: 'flex',
@@ -733,13 +873,20 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     gap: '20px',
+    position: 'relative',
+    zIndex: 1,
+    maxWidth: '1280px',
+    margin: '0 auto',
+    width: '100%',
   },
   trackerCard: {
-    backgroundColor: '#ffffff',
-    border: '1px solid #e7e5e4',
+    backgroundColor: 'rgba(24, 24, 27, 0.85)',
+    backdropFilter: 'blur(16px)',
+    border: '1px solid rgba(245, 158, 11, 0.3)',
     borderRadius: '16px',
     padding: '16px',
-    boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05)',
+    boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.37)',
+    color: '#ffffff',
   },
   trackerHeader: {
     display: 'flex',
@@ -750,6 +897,7 @@ const styles: Record<string, React.CSSProperties> = {
   trackerTitle: {
     fontSize: '15px',
     fontWeight: 700,
+    color: '#ffffff',
   },
   statusBadge: {
     fontSize: '11px',
@@ -784,7 +932,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '11px',
   },
   trackerFooter: {
-    borderTop: '1px solid #f5f5f4',
+    borderTop: '1px solid rgba(255,255,255,0.1)',
     paddingTop: '12px',
     display: 'flex',
     justifyContent: 'space-between',
@@ -794,29 +942,29 @@ const styles: Record<string, React.CSSProperties> = {
   },
   orderIdText: {
     fontSize: '11px',
-    color: '#78716c',
+    color: '#a1a1aa',
     fontWeight: 500,
   },
   requestBillBtn: {
-    backgroundColor: '#1e1b4b',
-    color: '#ffffff',
+    backgroundColor: '#f59e0b',
+    color: '#000000',
     border: 'none',
     borderRadius: '8px',
     padding: '8px 16px',
     fontSize: '12px',
-    fontWeight: 600,
+    fontWeight: 700,
     cursor: 'pointer',
   },
   billingAlert: {
     display: 'flex',
     alignItems: 'center',
     gap: '8px',
-    backgroundColor: '#fffbeb',
-    border: '1px solid #fef3c7',
+    backgroundColor: 'rgba(245, 158, 11, 0.15)',
+    border: '1px solid rgba(245, 158, 11, 0.4)',
     padding: '8px 12px',
     borderRadius: '8px',
     fontSize: '12px',
-    color: '#b45309',
+    color: '#f59e0b',
     width: '100%',
     justifyContent: 'space-between',
     flexWrap: 'wrap',
@@ -842,18 +990,19 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     listStyle: 'none',
     outline: 'none',
+    color: '#ffffff',
   },
   chevron: {
     transition: 'transform 0.2s',
   },
   aboutContent: {
     marginTop: '12px',
-    borderTop: '1px solid rgba(0,0,0,0.05)',
+    borderTop: '1px solid rgba(255,255,255,0.08)',
     paddingTop: '12px',
   },
   aboutDesc: {
     fontSize: '13px',
-    color: '#6b6661',
+    color: '#a1a1aa',
     lineHeight: '1.6',
     marginBottom: '12px',
   },
@@ -867,7 +1016,7 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: '8px',
     fontSize: '12px',
-    color: '#78716c',
+    color: '#a1a1aa',
   },
   filterSection: {
     display: 'flex',
@@ -890,12 +1039,14 @@ const styles: Record<string, React.CSSProperties> = {
   },
   searchInput: {
     width: '100%',
-    padding: '12px 14px 12px 42px',
-    borderRadius: '12px',
-    border: '1px solid #e7e5e4',
+    padding: '14px 14px 14px 44px',
+    borderRadius: '14px',
+    border: '1px solid rgba(255, 255, 255, 0.12)',
     outline: 'none',
     fontSize: '14px',
-    backgroundColor: '#ffffff',
+    backgroundColor: 'rgba(24, 24, 27, 0.85)',
+    color: '#ffffff',
+    backdropFilter: 'blur(12px)',
   },
   filterRow: {
     display: 'flex',
@@ -913,19 +1064,21 @@ const styles: Record<string, React.CSSProperties> = {
     scrollbarWidth: 'none',
   },
   categoryTab: {
-    background: '#ffffff',
-    border: '1px solid #e7e5e4',
+    background: 'rgba(24, 24, 27, 0.8)',
+    border: '1px solid rgba(255, 255, 255, 0.1)',
     borderRadius: '20px',
-    padding: '6px 14px',
+    padding: '8px 16px',
     fontSize: '13px',
-    fontWeight: 500,
-    color: '#78716c',
+    fontWeight: 600,
+    color: '#a1a1aa',
     cursor: 'pointer',
+    backdropFilter: 'blur(8px)',
   },
   activeCategoryTab: {
-    backgroundColor: '#ea580c',
-    borderColor: '#ea580c',
+    background: 'linear-gradient(135deg, #ea580c 0%, #f59e0b 100%)',
+    borderColor: '#f59e0b',
     color: '#ffffff',
+    boxShadow: '0 4px 15px rgba(245, 158, 11, 0.3)',
   },
   vegFilterBtn: {
     border: '1px solid',
@@ -939,21 +1092,23 @@ const styles: Record<string, React.CSSProperties> = {
   menuGrid: {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
-    gap: '16px',
+    gap: '20px',
   },
   menuCard: {
-    backgroundColor: '#ffffff',
-    border: '1px solid #e7e5e4',
-    borderRadius: '16px',
+    backgroundColor: 'rgba(24, 24, 27, 0.85)',
+    backdropFilter: 'blur(16px)',
+    border: '1px solid rgba(255, 255, 255, 0.08)',
+    borderRadius: '20px',
     overflow: 'hidden',
-    boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.02)',
+    boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.4)',
     display: 'flex',
     flexDirection: 'column',
+    transition: 'transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease',
   },
   cardImageWrapper: {
     position: 'relative',
     height: '180px',
-    backgroundColor: '#f5f5f4',
+    backgroundColor: '#18181b',
   },
   cardImage: {
     width: '100%',
@@ -964,7 +1119,7 @@ const styles: Record<string, React.CSSProperties> = {
     position: 'absolute',
     top: '12px',
     left: '12px',
-    backgroundColor: '#ecfdf5',
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
     color: '#10b981',
     border: '1px solid #10b981',
     padding: '2px 8px',
@@ -977,7 +1132,7 @@ const styles: Record<string, React.CSSProperties> = {
     position: 'absolute',
     top: '12px',
     left: '12px',
-    backgroundColor: '#fef2f2',
+    backgroundColor: 'rgba(239, 68, 68, 0.2)',
     color: '#ef4444',
     border: '1px solid #ef4444',
     padding: '2px 8px',
@@ -987,7 +1142,7 @@ const styles: Record<string, React.CSSProperties> = {
     textTransform: 'uppercase',
   },
   cardBody: {
-    padding: '16px',
+    padding: '18px',
     display: 'flex',
     flexDirection: 'column',
     flex: 1,
@@ -999,18 +1154,18 @@ const styles: Record<string, React.CSSProperties> = {
     marginBottom: '8px',
   },
   itemName: {
-    fontSize: '16px',
+    fontSize: '17px',
     fontWeight: 700,
-    color: '#1c1917',
+    color: '#ffffff',
   },
   itemPrice: {
-    fontSize: '16px',
+    fontSize: '17px',
     fontWeight: 800,
-    color: '#ea580c',
+    color: '#f59e0b',
   },
   itemDesc: {
     fontSize: '13px',
-    color: '#78716c',
+    color: '#a1a1aa',
     marginBottom: '16px',
     flex: 1,
     lineHeight: '1.5',
@@ -1020,15 +1175,15 @@ const styles: Record<string, React.CSSProperties> = {
   },
   addCartBtn: {
     width: '100%',
-    backgroundColor: '#ffffff',
-    border: '1px solid #ea580c',
-    color: '#ea580c',
-    borderRadius: '10px',
-    padding: '10px 0',
+    background: 'linear-gradient(135deg, #ea580c 0%, #f59e0b 100%)',
+    border: 'none',
+    color: '#ffffff',
+    borderRadius: '12px',
+    padding: '12px 0',
     fontSize: '14px',
     fontWeight: 700,
     cursor: 'pointer',
-    transition: 'all 0.2s',
+    boxShadow: '0 4px 15px rgba(234, 88, 12, 0.3)',
   },
   quantityWidget: {
     display: 'flex',
@@ -1138,6 +1293,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   cartDrawer: {
     backgroundColor: '#ffffff',
+    color: '#1c1917',
     width: '100%',
     maxWidth: '480px',
     height: '100%',
@@ -1151,10 +1307,12 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
+    color: '#1c1917',
   },
   drawerTitle: {
     fontSize: '18px',
     fontWeight: 700,
+    color: '#1c1917',
   },
   drawerCloseBtn: {
     background: 'none',
@@ -1169,6 +1327,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     gap: '20px',
+    color: '#1c1917',
   },
   cartItemRow: {
     display: 'flex',
@@ -1205,6 +1364,7 @@ const styles: Record<string, React.CSSProperties> = {
   cartItemName: {
     fontSize: '14px',
     fontWeight: 600,
+    color: '#1c1917',
   },
   cartItemPrice: {
     fontSize: '12px',
@@ -1238,12 +1398,14 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     width: '16px',
     textAlign: 'center',
+    color: '#1c1917',
   },
   cartItemRowTotal: {
     fontSize: '14px',
     fontWeight: 700,
     width: '50px',
     textAlign: 'right',
+    color: '#1c1917',
   },
   notesSection: {
     display: 'flex',
@@ -1253,7 +1415,7 @@ const styles: Record<string, React.CSSProperties> = {
   notesLabel: {
     fontSize: '12px',
     fontWeight: 600,
-    color: '#78716c',
+    color: '#57534e',
   },
   notesTextarea: {
     padding: '10px 12px',
@@ -1264,6 +1426,8 @@ const styles: Record<string, React.CSSProperties> = {
     resize: 'none',
     height: '60px',
     fontFamily: 'inherit',
+    backgroundColor: '#ffffff',
+    color: '#1c1917',
   },
   billDetails: {
     backgroundColor: '#fafaf9',
@@ -1302,6 +1466,7 @@ const styles: Record<string, React.CSSProperties> = {
   }
 };
 
+// Add standard styles for indicator square dot inside CSS
 if (typeof document !== 'undefined') {
   const styleSheet = document.createElement('style');
   styleSheet.type = 'text/css';
@@ -1330,4 +1495,3 @@ if (typeof document !== 'undefined') {
   `;
   document.head.appendChild(styleSheet);
 }
-export default CustomerView;

@@ -1,47 +1,53 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useApp } from '../context/AppContext';
-import { ChefHat, Clock, Flame, Check, CheckCircle2, Volume2, VolumeX, Sparkles } from 'lucide-react';
-import { AiKitchenInsights } from './ai/AiKitchenInsights';
+import { Order } from '../types';
+import { ChefHat, Clock, Flame, Check, CheckCircle2, Volume2, VolumeX } from 'lucide-react';
+import { RestaurantLogo } from './RestaurantLogo';
 
 export const KitchenView: React.FC = () => {
-  const { orders, menu, updateOrderStatus, isCloudSync } = useApp();
+  const { orders, updateOrderStatus } = useApp();
   const [soundEnabled, setSoundEnabled] = useState(true);
   const prevOrdersCount = useRef(orders.length);
 
-
+  // Filter orders relevant for kitchen
   const kitchenOrders = orders.filter(
     order => order.status === 'received' || order.status === 'preparing' || order.status === 'ready'
   );
 
+  // Play audio chime when a new order arrives
   useEffect(() => {
     const receivedOrders = orders.filter(o => o.status === 'received');
     const prevCount = prevOrdersCount.current;
     prevOrdersCount.current = orders.length;
 
+    // Trigger sound if number of orders increased or there are new received orders
     if (soundEnabled && orders.length > prevCount && receivedOrders.length > 0) {
       playKitchenChime();
     }
   }, [orders, soundEnabled]);
 
+  // Audio synthesizer for a friendly kitchen notification "Ding"
   const playKitchenChime = () => {
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
       
+      // High note
       const osc1 = ctx.createOscillator();
       const gain1 = ctx.createGain();
       osc1.type = 'triangle';
-      osc1.frequency.setValueAtTime(587.33, ctx.currentTime);
+      osc1.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
       gain1.gain.setValueAtTime(0.15, ctx.currentTime);
       gain1.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.8);
       osc1.connect(gain1);
       gain1.connect(ctx.destination);
       
+      // Harmonics
       const osc2 = ctx.createOscillator();
       const gain2 = ctx.createGain();
       osc2.type = 'sine';
-      osc2.frequency.setValueAtTime(880.00, ctx.currentTime + 0.1);
+      osc2.frequency.setValueAtTime(880.00, ctx.currentTime + 0.1); // A5
       gain2.gain.setValueAtTime(0.1, ctx.currentTime + 0.1);
       gain2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.9);
       osc2.connect(gain2);
@@ -64,6 +70,7 @@ export const KitchenView: React.FC = () => {
     return `${diffMin}m ago`;
   };
 
+  // Helper timer tick to update time-ago tags
   const [tick, setTick] = useState(0);
   useEffect(() => {
     const timer = setInterval(() => setTick(t => t + 1), 30000);
@@ -75,14 +82,10 @@ export const KitchenView: React.FC = () => {
       {/* Top Navbar */}
       <header style={styles.navHeader} className="dashboard-glass-card">
         <div style={styles.navBrand}>
-          <div style={styles.chefIconBg}>
-            <ChefHat size={22} color="#09090b" />
-          </div>
+          <RestaurantLogo size={42} />
           <div>
             <h1 style={styles.navTitle}>Kitchen Display System (KDS)</h1>
-            <p style={styles.navSubtitle}>
-              {isCloudSync ? "Live Cloud Sync active" : "Active preparation dashboard"}
-            </p>
+            <p style={styles.navSubtitle}>Active preparation dashboard</p>
           </div>
         </div>
 
@@ -107,12 +110,8 @@ export const KitchenView: React.FC = () => {
         </div>
       </header>
 
-      {/* AI Kitchen Intelligence Advisor */}
-      <AiKitchenInsights orders={orders} menu={menu} />
-
       {/* Main Board Grid */}
       <main style={styles.boardGrid}>
-
         
         {/* Column 1: Received / New Queue */}
         <section style={styles.column}>
@@ -126,16 +125,26 @@ export const KitchenView: React.FC = () => {
                 <div key={order.id} style={styles.orderCardNew} className="dashboard-glass-card animate-scale-in">
                   <div style={styles.cardHeader}>
                     <div>
-                      <h3 style={styles.cardTable}>{order.sectionName} - {order.tableId.split('-').pop()}</h3>
-                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '4px' }}>
-                        <span style={styles.cardTime}>
-                          <Clock size={12} style={{ marginRight: '4px' }} />
-                          {getElapsedTime(order.timestamp)}
-                        </span>
-                        <span style={styles.aiPrepBadge}>
-                          <Sparkles size={11} color="#ea580c" /> AI Est: ~{order.estimatedPrepTimeMinutes || 15}m
-                        </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <h3 style={styles.cardTable}>{order.sectionName} - {order.tableId.split('-').pop()}</h3>
+                        {order.roundNumber && (
+                          <span style={{
+                            fontSize: '11px',
+                            padding: '2px 6px',
+                            borderRadius: '4px',
+                            background: 'rgba(59, 130, 246, 0.2)',
+                            color: '#60a5fa',
+                            border: '1px solid rgba(59, 130, 246, 0.3)',
+                            fontWeight: 700
+                          }}>
+                            Round #{order.roundNumber}
+                          </span>
+                        )}
                       </div>
+                      <p style={styles.cardTime}>
+                        <Clock size={12} style={{ marginRight: '4px' }} />
+                        {getElapsedTime(order.timestamp)}
+                      </p>
                     </div>
                     <span style={styles.statusLabelNew}>NEW</span>
                   </div>
@@ -182,20 +191,29 @@ export const KitchenView: React.FC = () => {
                 <div key={order.id} style={styles.orderCardPrep} className="dashboard-glass-card animate-scale-in">
                   <div style={styles.cardHeader}>
                     <div>
-                      <h3 style={styles.cardTable}>{order.sectionName} - {order.tableId.split('-').pop()}</h3>
-                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '4px' }}>
-                        <span style={styles.cardTime}>
-                          <Clock size={12} style={{ marginRight: '4px' }} />
-                          {getElapsedTime(order.timestamp)}
-                        </span>
-                        <span style={styles.aiPrepBadge}>
-                          <Sparkles size={11} color="#ea580c" /> AI Est: ~{order.estimatedPrepTimeMinutes || 15}m
-                        </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <h3 style={styles.cardTable}>{order.sectionName} - {order.tableId.split('-').pop()}</h3>
+                        {order.roundNumber && (
+                          <span style={{
+                            fontSize: '11px',
+                            padding: '2px 6px',
+                            borderRadius: '4px',
+                            background: 'rgba(245, 158, 11, 0.2)',
+                            color: '#fbbf24',
+                            border: '1px solid rgba(245, 158, 11, 0.3)',
+                            fontWeight: 700
+                          }}>
+                            Round #{order.roundNumber}
+                          </span>
+                        )}
                       </div>
+                      <p style={styles.cardTime}>
+                        <Clock size={12} style={{ marginRight: '4px' }} />
+                        {getElapsedTime(order.timestamp)}
+                      </p>
                     </div>
                     <span style={styles.statusLabelPrep}>PREPARING</span>
                   </div>
-
 
                   <div style={styles.cardItems}>
                     {order.items.map((item, idx) => (
@@ -227,7 +245,7 @@ export const KitchenView: React.FC = () => {
           </div>
         </section>
 
-        {/* Column 3: Ready / Served Queue */}
+        {/* Column 3: Ready / Completed Queue */}
         <section style={styles.column}>
           <div style={styles.columnHeader}>
             <CheckCircle2 size={18} color="#10b981" style={{ marginRight: '8px' }} />
@@ -239,7 +257,22 @@ export const KitchenView: React.FC = () => {
                 <div key={order.id} style={styles.orderCardReady} className="dashboard-glass-card animate-scale-in">
                   <div style={styles.cardHeader}>
                     <div>
-                      <h3 style={styles.cardTable}>{order.sectionName} - {order.tableId.split('-').pop()}</h3>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <h3 style={styles.cardTable}>{order.sectionName} - {order.tableId.split('-').pop()}</h3>
+                        {order.roundNumber && (
+                          <span style={{
+                            fontSize: '11px',
+                            padding: '2px 6px',
+                            borderRadius: '4px',
+                            background: 'rgba(16, 185, 129, 0.2)',
+                            color: '#34d399',
+                            border: '1px solid rgba(16, 185, 129, 0.3)',
+                            fontWeight: 700
+                          }}>
+                            Round #{order.roundNumber}
+                          </span>
+                        )}
+                      </div>
                       <p style={styles.cardTime}>
                         <Clock size={12} style={{ marginRight: '4px' }} />
                         {getElapsedTime(order.timestamp)}
@@ -542,22 +575,10 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '13px',
     color: '#71717a',
     marginTop: '12px',
-  },
-  aiPrepBadge: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '3px',
-    backgroundColor: 'rgba(234, 88, 12, 0.12)',
-    border: '1px solid rgba(234, 88, 12, 0.3)',
-    borderRadius: '4px',
-    padding: '2px 6px',
-    fontSize: '10px',
-    fontWeight: 600,
-    color: '#f97316',
   }
 };
 
-
+// Add standard keyframes for red pulse light KDS alert
 if (typeof document !== 'undefined') {
   const styleSheet = document.createElement('style');
   styleSheet.type = 'text/css';

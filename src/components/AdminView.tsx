@@ -1,34 +1,40 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
-import { MenuItem, Order, Table } from '../types';
+import { MenuItem, Order, Table, Section } from '../types';
 import { HOTEL_INFO } from '../mockData';
-import { AiAdminAnalytics } from './ai/AiAdminAnalytics';
+import { RestaurantLogo } from './RestaurantLogo';
 import { 
   BarChart3, QrCode, ClipboardList, Plus, Edit2, Trash2, 
   DollarSign, Percent, Receipt, Check, RefreshCw, Layers, 
-  ExternalLink, Download, AlertCircle, ShoppingBag, Sparkles 
+  ExternalLink, Download, AlertCircle, ShoppingBag, Eye,
+  Users, Link as LinkIcon, Unlink
 } from 'lucide-react';
 import QRCode from 'qrcode';
 
 export const AdminView: React.FC = () => {
   const { 
     menu, sections, orders, updateOrderStatus, settleBill, 
-    addMenuItem, updateMenuItem, deleteMenuItem, resetMenuToDefault, isCloudSync 
+    addMenuItem, updateMenuItem, deleteMenuItem,
+    tableSessions, joinTables, unjoinTable, settleSessionBill, getActiveSession
   } = useApp();
 
-
-  const [activeTab, setActiveTab] = useState<'tables' | 'qr' | 'menu' | 'analytics' | 'ai_insights'>('ai_insights');
-
+  const [activeTab, setActiveTab] = useState<'tables' | 'qr' | 'menu' | 'analytics'>('tables');
   
+  // Table management state
   const [selectedTable, setSelectedTable] = useState<{ sectionName: string; table: Table } | null>(null);
   const [discountPercent, setDiscountPercent] = useState<number>(0);
   const [taxPercent] = useState<number>(5); // GST 5%
   const [serviceChargePercent, setServiceChargePercent] = useState<number>(5);
+  const [joinModalOpen, setJoinModalOpen] = useState(false);
+  const [splitGuests, setSplitGuests] = useState<number>(1);
+  const [selectedTablesToJoin, setSelectedTablesToJoin] = useState<string[]>([]);
 
+  // QR Code state
   const [qrSection, setQrSection] = useState(sections[0]?.name || '');
   const [qrTableId, setQrTableId] = useState('');
   const qrCanvasRef = useRef<HTMLCanvasElement>(null);
 
+  // Menu editor state
   const [isAddingItem, setIsAddingItem] = useState(false);
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
   const [itemName, setItemName] = useState('');
@@ -39,22 +45,17 @@ export const AdminView: React.FC = () => {
   const [itemDesc, setItemDesc] = useState('');
   const [itemImage, setItemImage] = useState('');
 
-  // Re-sync default values if sections are loaded async
+  // Default table selected in QR generator
   useEffect(() => {
-    if (sections.length > 0 && !qrSection) {
-      setQrSection(sections[0].name);
-    }
-  }, [sections]);
-
-  useEffect(() => {
-    if (sections.length > 0 && qrSection) {
-      const section = sections.find(s => s.name === qrSection) || sections[0];
-      if (section && section.tables.length > 0) {
-        setQrTableId(section.tables[0].id);
+    if (sections.length > 0 && !qrTableId) {
+      const firstSection = sections.find(s => s.name === qrSection) || sections[0];
+      if (firstSection && firstSection.tables.length > 0) {
+        setQrTableId(firstSection.tables[0].id);
       }
     }
   }, [qrSection, sections]);
 
+  // Generate QR Code on canvas
   const getCustomerUrl = (sec: string, tabId: string) => {
     return `${window.location.origin}/?section=${encodeURIComponent(sec)}&table=${encodeURIComponent(tabId)}`;
   };
@@ -75,16 +76,19 @@ export const AdminView: React.FC = () => {
     }
   }, [activeTab, qrSection, qrTableId]);
 
+  // Find active order details for a table
   const getActiveOrderForTable = (table: Table, sectionName: string): Order | undefined => {
     if (!table.currentOrderId) return undefined;
     return orders.find(o => o.id === table.currentOrderId && o.status !== 'completed');
   };
 
+  // Settle table bill
   const handleSettle = (orderId: string, method: 'UPI' | 'Card' | 'Cash') => {
     settleBill(orderId, method);
     setSelectedTable(null);
   };
 
+  // Add / Edit menu item submit handler
   const handleMenuSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const itemData = {
@@ -105,6 +109,7 @@ export const AdminView: React.FC = () => {
       setIsAddingItem(false);
     }
 
+    // Reset Form
     setItemName('');
     setItemPrice('');
     setItemDesc('');
@@ -122,8 +127,9 @@ export const AdminView: React.FC = () => {
     setIsAddingItem(true);
   };
 
-  const getTotals = (order: Order) => {
-    const subtotal = order.totalAmount;
+  // Calculation utilities
+  const getTotals = (subtotalOrOrder: number | Order) => {
+    const subtotal = typeof subtotalOrOrder === 'number' ? subtotalOrOrder : subtotalOrOrder.totalAmount;
     const tax = subtotal * (taxPercent / 100);
     const service = subtotal * (serviceChargePercent / 100);
     const discount = subtotal * (discountPercent / 100);
@@ -131,6 +137,7 @@ export const AdminView: React.FC = () => {
     return { subtotal, tax, service, discount, grand };
   };
 
+  // Analytics Helpers
   const getTotalRevenue = () => {
     return orders
       .filter(o => o.status === 'completed')
@@ -166,14 +173,10 @@ export const AdminView: React.FC = () => {
       {/* Top Navbar */}
       <header style={styles.navHeader} className="dashboard-glass-card">
         <div style={styles.navBrand}>
-          <div style={styles.logoBg}>
-            <Layers size={22} color="#09090b" />
-          </div>
+          <RestaurantLogo size={42} />
           <div>
             <h1 style={styles.navTitle}>{HOTEL_INFO.name}</h1>
-            <p style={styles.navSubtitle}>
-              {isCloudSync ? "Owner Cloud Admin Dashboard" : "Owner & Restaurant Admin Dashboard"}
-            </p>
+            <p style={styles.navSubtitle}>Owner & Restaurant Admin Dashboard</p>
           </div>
         </div>
 
@@ -197,19 +200,6 @@ export const AdminView: React.FC = () => {
             <Layers size={16} /> Menu Manager
           </button>
           <button 
-            onClick={() => setActiveTab('ai_insights')} 
-            style={{ 
-              ...styles.navLink, 
-              ...(activeTab === 'ai_insights' ? {
-                ...styles.activeNavLink,
-                backgroundImage: 'linear-gradient(135deg, #ea580c 0%, #c2410c 100%)'
-              } : {}) 
-            }}
-          >
-            <Sparkles size={16} color={activeTab === 'ai_insights' ? '#ffffff' : '#f97316'} /> AI Business Intelligence
-          </button>
-
-          <button 
             onClick={() => setActiveTab('analytics')} 
             style={{ ...styles.navLink, ...(activeTab === 'analytics' ? styles.activeNavLink : {}) }}
           >
@@ -220,15 +210,9 @@ export const AdminView: React.FC = () => {
 
       {/* Main View Area */}
       <div style={styles.contentArea}>
-
-        {/* AI BUSINESS INTELLIGENCE TAB */}
-        {activeTab === 'ai_insights' && (
-          <AiAdminAnalytics />
-        )}
         
         {/* TABLE LAYOUT TAB */}
         {activeTab === 'tables' && (
-
           <div style={styles.tabContentRow}>
             {/* Sections and Tables */}
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '28px' }}>
@@ -238,14 +222,17 @@ export const AdminView: React.FC = () => {
                   <div style={styles.tableGrid}>
                     {section.tables.map(table => {
                       const activeOrder = getActiveOrderForTable(table, section.name);
+                      const session = getActiveSession(table.id, section.name);
                       const isOccupied = table.status === 'occupied';
                       const isBilling = table.status === 'billing_requested';
+                      const isJointMember = !!table.joinedWith;
+                      const hasJoinedOthers = session?.joinedTableIds && session.joinedTableIds.length > 0 && session.primaryTableId === table.id;
                       
                       let cardStyle = styles.tableCardFree;
                       let statusText = "FREE";
                       if (isOccupied) {
                         cardStyle = styles.tableCardOccupied;
-                        statusText = activeOrder ? activeOrder.status.toUpperCase() : "OCCUPIED";
+                        statusText = isJointMember ? `JOINT (with ${table.joinedWith})` : (activeOrder ? activeOrder.status.toUpperCase() : "OCCUPIED");
                       } else if (isBilling) {
                         cardStyle = styles.tableCardBilling;
                         statusText = "BILL REQUEST";
@@ -258,6 +245,7 @@ export const AdminView: React.FC = () => {
                           style={{
                             ...styles.tableCardBase,
                             ...cardStyle,
+                            border: hasJoinedOthers ? '2px dashed #f59e0b' : cardStyle.border,
                             animation: isBilling ? 'pulseRedBorder 1.5s infinite' : 'none'
                           }}
                           className="dashboard-glass-card animate-scale-in"
@@ -273,7 +261,22 @@ export const AdminView: React.FC = () => {
                             </span>
                           </div>
 
-                          {activeOrder && (
+                          {/* Joint Table indicator */}
+                          {hasJoinedOthers && (
+                            <div style={{ marginTop: '4px', fontSize: '11px', color: '#f59e0b', fontWeight: 600 }}>
+                              🔗 Merged with: {session!.joinedTableIds!.join(', ')}
+                            </div>
+                          )}
+
+                          {session && session.subtotal > 0 && (
+                            <div style={styles.tableCardOrderBrief}>
+                              <p style={styles.orderBriefItems}>
+                                {session.rounds.length} Round{session.rounds.length > 1 ? 's' : ''} ({session.rounds.reduce((acc, r) => acc + r.items.reduce((s, i) => s + i.quantity, 0), 0)} items)
+                              </p>
+                              <p style={styles.orderBriefPrice}>Tab: ₹{session.subtotal}</p>
+                            </div>
+                          )}
+                          {!session && activeOrder && (
                             <div style={styles.tableCardOrderBrief}>
                               <p style={styles.orderBriefItems}>{activeOrder.items.reduce((s, i) => s + i.quantity, 0)} Items ordered</p>
                               <p style={styles.orderBriefPrice}>₹{activeOrder.totalAmount}</p>
@@ -292,131 +295,439 @@ export const AdminView: React.FC = () => {
               <div style={styles.billingSidebar} className="dashboard-glass-card animate-slide-up">
                 {(() => {
                   const tableData = selectedTable.table;
+                  const currentSection = sections.find(s => s.name === selectedTable.sectionName);
+                  const session = getActiveSession(tableData.id, selectedTable.sectionName);
                   const activeOrder = getActiveOrderForTable(tableData, selectedTable.sectionName);
                   
+                  const isJoinedChild = !!tableData.joinedWith;
+                  const isPrimaryWithJoined = !!(session?.joinedTableIds && session.joinedTableIds.length > 0 && session.primaryTableId === tableData.id);
+
+                  // Extract all rounds or fallback to activeOrder items
+                  const hasSessionRounds = !!(session && session.rounds && session.rounds.length > 0);
+                  const hasActiveOrder = !!(activeOrder && activeOrder.items.length > 0);
+                  const hasItems = hasSessionRounds || hasActiveOrder;
+                  
+                  const subtotal = session ? session.subtotal : (activeOrder ? activeOrder.totalAmount : 0);
+                  const calc = getTotals(subtotal);
+
+                  const otherCandidateTables = currentSection?.tables.filter(
+                    t => t.id !== tableData.id && !t.joinedWith && (!session?.joinedTableIds || !session.joinedTableIds.includes(t.id))
+                  ) || [];
+
+                  const selectedBillsTotal = selectedTablesToJoin.reduce((acc, jId) => {
+                    const s = getActiveSession(jId, selectedTable.sectionName);
+                    const o = getActiveOrderForTable({ id: jId } as any, selectedTable.sectionName);
+                    return acc + (s ? s.subtotal : (o ? o.totalAmount : 0));
+                  }, 0);
+
+                  const handleSettleAction = (method: 'Cash' | 'Card' | 'UPI') => {
+                    if (session) {
+                      settleSessionBill(session.sessionId, method);
+                    } else if (activeOrder) {
+                      settleBill(activeOrder.id, method);
+                    }
+                    setSelectedTable(null);
+                  };
+
                   return (
                     <>
                       <div style={styles.sidebarHeader}>
                         <div>
-                          <h3 style={styles.sidebarTitle}>{tableData.name}</h3>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <h3 style={styles.sidebarTitle}>{tableData.name}</h3>
+                            {isJoinedChild && (
+                              <span style={{ fontSize: '11px', padding: '2px 6px', borderRadius: '4px', background: 'rgba(245, 158, 11, 0.2)', color: '#f59e0b', fontWeight: 700 }}>
+                                Child Table
+                              </span>
+                            )}
+                            {isPrimaryWithJoined && (
+                              <span style={{ fontSize: '11px', padding: '2px 6px', borderRadius: '4px', background: 'rgba(59, 130, 246, 0.2)', color: '#60a5fa', fontWeight: 700 }}>
+                                Primary Table
+                              </span>
+                            )}
+                          </div>
                           <p style={styles.sidebarSubtitle}>{selectedTable.sectionName}</p>
                         </div>
                         <button onClick={() => setSelectedTable(null)} style={styles.sidebarClose}>&times;</button>
                       </div>
 
-                      {activeOrder ? (
-                        <div style={styles.sidebarBody}>
-                          {/* Order Items list */}
-                          <div style={styles.orderListContainer}>
-                            <h4 style={styles.detailsGroupTitle}>Ordered Items</h4>
-                            <div style={styles.orderedItemsScroll}>
-                              {activeOrder.items.map((item, idx) => (
-                                <div key={idx} style={styles.sidebarItemRow}>
-                                  <div>
-                                    <p style={styles.sidebarItemName}>{item.menuItem.name} &times; {item.quantity}</p>
-                                    {item.notes && <p style={styles.sidebarItemNotes}>Note: {item.notes}</p>}
-                                  </div>
-                                  <span style={styles.sidebarItemTotal}>₹{item.menuItem.price * item.quantity}</span>
-                                </div>
+                      <div style={styles.sidebarBody}>
+                        {/* CHILD TABLE NOTICE */}
+                        {isJoinedChild && (
+                          <div style={{ padding: '12px', borderRadius: '8px', background: 'rgba(245, 158, 11, 0.1)', border: '1px solid rgba(245, 158, 11, 0.3)', marginBottom: '16px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#f59e0b', fontWeight: 600, fontSize: '13px' }}>
+                              <Users size={15} /> Merged with Table {tableData.joinedWith}
+                            </div>
+                            <p style={{ fontSize: '12px', color: '#d4d4d8', marginTop: '4px' }}>
+                              This table is linked to <strong>{tableData.joinedWith}</strong> and shares its running tab.
+                            </p>
+                            <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+                              <button
+                                onClick={() => {
+                                  const parentTable = currentSection?.tables.find(t => t.id === tableData.joinedWith);
+                                  if (parentTable) setSelectedTable({ sectionName: selectedTable.sectionName, table: parentTable });
+                                }}
+                                style={{ ...styles.actionIconBtn, width: 'auto', padding: '6px 12px', fontSize: '12px', color: '#f59e0b', borderColor: 'rgba(245, 158, 11, 0.4)' }}
+                              >
+                                View Main Bill
+                              </button>
+                              <button
+                                onClick={async () => {
+                                  await unjoinTable(tableData.id, selectedTable.sectionName);
+                                  setSelectedTable(null);
+                                }}
+                                style={{ ...styles.actionIconBtn, width: 'auto', padding: '6px 12px', fontSize: '12px', color: '#ef4444', borderColor: 'rgba(239, 68, 68, 0.4)' }}
+                              >
+                                <Unlink size={12} style={{ marginRight: '4px' }} /> Unmerge Table
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* PRIMARY MERGED TABLES LIST */}
+                        {isPrimaryWithJoined && (
+                          <div style={{ padding: '12px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid rgba(59, 130, 246, 0.3)', marginBottom: '16px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                              <span style={{ color: '#60a5fa', fontWeight: 600, fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <Users size={15} /> Merged Group Tables:
+                              </span>
+                              <span style={{ fontSize: '11px', color: '#93c5fd' }}>Unified Bill</span>
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                              {session.joinedTableIds!.map(jId => (
+                                <span key={jId} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', background: 'rgba(59, 130, 246, 0.2)', padding: '4px 8px', borderRadius: '4px', fontSize: '12px', color: '#bfdbfe' }}>
+                                  {jId}
+                                  <button
+                                    onClick={() => unjoinTable(jId, selectedTable.sectionName)}
+                                    title={`Unmerge ${jId}`}
+                                    style={{ background: 'none', border: 'none', color: '#f87171', cursor: 'pointer', padding: 0, marginLeft: '4px', fontWeight: 700 }}
+                                  >
+                                    &times;
+                                  </button>
+                                </span>
                               ))}
                             </div>
                           </div>
+                        )}
 
-                          {/* Billing modifiers */}
-                          <div style={styles.billingModifiers}>
-                            <h4 style={styles.detailsGroupTitle}>Bill Calculations</h4>
-                            
-                            <div style={styles.inputRow}>
-                              <div style={styles.modifierInputGroup}>
-                                <Percent size={14} style={{ marginRight: '6px' }} />
-                                <label style={styles.modifierLabel}>Discount (%)</label>
-                                <input 
-                                  type="number" 
-                                  min="0" 
-                                  max="100" 
-                                  value={discountPercent} 
-                                  onChange={(e) => setDiscountPercent(Math.min(100, Math.max(0, parseInt(e.target.value) || 0)))}
-                                  style={styles.modifierInput}
-                                />
+                        {/* TABLE BILL MERGING (COMBINE ACTIVE BILLS OR SEATING TOGETHER) */}
+                        {!isJoinedChild && (
+                          <div style={{ marginBottom: '16px' }}>
+                            {!joinModalOpen ? (
+                              <button
+                                onClick={() => {
+                                  setSelectedTablesToJoin([]);
+                                  setJoinModalOpen(true);
+                                }}
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: '8px',
+                                  width: '100%',
+                                  padding: '10px 14px',
+                                  borderRadius: '8px',
+                                  background: 'rgba(245, 158, 11, 0.1)',
+                                  border: '1px solid rgba(245, 158, 11, 0.4)',
+                                  color: '#f59e0b',
+                                  fontSize: '12px',
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                  transition: 'all 0.2s'
+                                }}
+                              >
+                                <LinkIcon size={14} /> Merge Table Bills (Combine Active Tabs)
+                              </button>
+                            ) : (
+                              <div style={{ padding: '14px', borderRadius: '10px', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(245, 158, 11, 0.3)' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                                  <span style={{ fontSize: '13px', fontWeight: 700, color: '#f4f4f5' }}>
+                                    Merge bills into {tableData.name}:
+                                  </span>
+                                  <button onClick={() => setJoinModalOpen(false)} style={{ background: 'none', border: 'none', color: '#a1a1aa', cursor: 'pointer', fontSize: '18px', lineHeight: '18px' }}>&times;</button>
+                                </div>
+                                <p style={{ fontSize: '11px', color: '#a1a1aa', margin: '0 0 10px 0' }}>
+                                  Select tables to combine their ordered foods and tab into this unified bill:
+                                </p>
+
+                                {otherCandidateTables.length === 0 ? (
+                                  <p style={{ fontSize: '12px', color: '#71717a' }}>No other available tables in {selectedTable.sectionName}.</p>
+                                ) : (
+                                  <>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '12px', maxHeight: '180px', overflowY: 'auto' }}>
+                                      {otherCandidateTables.map(t => {
+                                        const isSelected = selectedTablesToJoin.includes(t.id);
+                                        const tSession = getActiveSession(t.id, selectedTable.sectionName);
+                                        const tOrder = getActiveOrderForTable(t, selectedTable.sectionName);
+                                        const tBill = tSession ? tSession.subtotal : (tOrder ? tOrder.totalAmount : 0);
+                                        const hasBill = tBill > 0;
+
+                                        return (
+                                          <button
+                                            key={t.id}
+                                            onClick={() => {
+                                              if (isSelected) {
+                                                setSelectedTablesToJoin(selectedTablesToJoin.filter(id => id !== t.id));
+                                              } else {
+                                                setSelectedTablesToJoin([...selectedTablesToJoin, t.id]);
+                                              }
+                                            }}
+                                            style={{
+                                              display: 'flex',
+                                              alignItems: 'center',
+                                              justifyContent: 'space-between',
+                                              padding: '8px 12px',
+                                              borderRadius: '8px',
+                                              fontSize: '12px',
+                                              fontWeight: 600,
+                                              cursor: 'pointer',
+                                              border: isSelected ? '1px solid #f59e0b' : '1px solid rgba(255,255,255,0.08)',
+                                              background: isSelected ? 'rgba(245, 158, 11, 0.22)' : 'rgba(255,255,255,0.03)',
+                                              color: isSelected ? '#f59e0b' : '#e4e4e7'
+                                            }}
+                                          >
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                              <input 
+                                                type="checkbox" 
+                                                checked={isSelected} 
+                                                readOnly 
+                                                style={{ accentColor: '#f59e0b', cursor: 'pointer' }} 
+                                              />
+                                              <span style={{ fontWeight: 600 }}>{t.name}</span>
+                                            </div>
+
+                                            {hasBill ? (
+                                              <span style={{ 
+                                                fontSize: '11px', 
+                                                fontWeight: 700, 
+                                                color: '#f59e0b', 
+                                                background: 'rgba(245, 158, 11, 0.15)', 
+                                                border: '1px solid rgba(245, 158, 11, 0.3)',
+                                                padding: '2px 8px', 
+                                                borderRadius: '6px' 
+                                              }}>
+                                                Bill: ₹{tBill}
+                                              </span>
+                                            ) : (
+                                              <span style={{ 
+                                                fontSize: '11px', 
+                                                color: '#10b981', 
+                                                background: 'rgba(16, 185, 129, 0.1)', 
+                                                padding: '2px 8px', 
+                                                borderRadius: '6px' 
+                                              }}>
+                                                Free
+                                              </span>
+                                            )}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+
+                                    <button
+                                      disabled={selectedTablesToJoin.length === 0}
+                                      onClick={async () => {
+                                        await joinTables(tableData.id, selectedTablesToJoin, selectedTable.sectionName);
+                                        setJoinModalOpen(false);
+                                        setSelectedTablesToJoin([]);
+                                      }}
+                                      style={{
+                                        width: '100%',
+                                        padding: '9px 12px',
+                                        borderRadius: '8px',
+                                        background: selectedTablesToJoin.length > 0 ? '#f59e0b' : 'rgba(255,255,255,0.06)',
+                                        color: selectedTablesToJoin.length > 0 ? '#000' : '#71717a',
+                                        border: 'none',
+                                        fontWeight: 700,
+                                        fontSize: '12px',
+                                        cursor: selectedTablesToJoin.length > 0 ? 'pointer' : 'not-allowed',
+                                        boxShadow: selectedTablesToJoin.length > 0 ? '0 4px 12px rgba(245, 158, 11, 0.3)' : 'none'
+                                      }}
+                                    >
+                                      {selectedTablesToJoin.length > 0 
+                                        ? `Confirm Bill Merge (${selectedTablesToJoin.length} Table${selectedTablesToJoin.length > 1 ? 's' : ''}${selectedBillsTotal > 0 ? ` • +₹${selectedBillsTotal}` : ''})` 
+                                        : 'Select tables to merge bills'}
+                                    </button>
+                                  </>
+                                )}
                               </div>
-                              <div style={styles.modifierInputGroup}>
-                                <Percent size={14} style={{ marginRight: '6px' }} />
-                                <label style={styles.modifierLabel}>Service Chg (%)</label>
-                                <input 
-                                  type="number" 
-                                  min="0" 
-                                  max="100" 
-                                  value={serviceChargePercent} 
-                                  onChange={(e) => setServiceChargePercent(Math.min(100, Math.max(0, parseInt(e.target.value) || 0)))}
-                                  style={styles.modifierInput}
-                                />
+                            )}
+                          </div>
+                        )}
+
+                        {hasItems ? (
+                          <>
+                            {/* Ordered Items List */}
+                            <div style={styles.orderListContainer}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                                <h4 style={styles.detailsGroupTitle}>
+                                  {hasSessionRounds ? `Tab Orders (${session.rounds.length} Round${session.rounds.length > 1 ? 's' : ''})` : 'Ordered Items'}
+                                </h4>
+                                {hasSessionRounds && (
+                                  <span style={{ fontSize: '11px', color: '#10b981', fontWeight: 600 }}>Active Tab</span>
+                                )}
+                              </div>
+
+                              <div style={styles.orderedItemsScroll}>
+                                {hasSessionRounds ? (
+                                  session.rounds.map((round) => (
+                                    <div key={round.roundNumber} style={{ marginBottom: '12px', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '8px' }}>
+                                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#f59e0b', fontWeight: 700, marginBottom: '6px' }}>
+                                        <span>Round #{round.roundNumber}</span>
+                                        <span style={{ color: '#71717a' }}>{new Date(round.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                      </div>
+                                      {round.items.map((item, idx) => (
+                                        <div key={idx} style={styles.sidebarItemRow}>
+                                          <div>
+                                            <p style={styles.sidebarItemName}>{item.menuItem.name} &times; {item.quantity}</p>
+                                            {item.notes && <p style={styles.sidebarItemNotes}>Note: {item.notes}</p>}
+                                          </div>
+                                          <span style={styles.sidebarItemTotal}>₹{item.menuItem.price * item.quantity}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ))
+                                ) : (
+                                  activeOrder && activeOrder.items.map((item, idx) => (
+                                    <div key={idx} style={styles.sidebarItemRow}>
+                                      <div>
+                                        <p style={styles.sidebarItemName}>{item.menuItem.name} &times; {item.quantity}</p>
+                                        {item.notes && <p style={styles.sidebarItemNotes}>Note: {item.notes}</p>}
+                                      </div>
+                                      <span style={styles.sidebarItemTotal}>₹{item.menuItem.price * item.quantity}</span>
+                                    </div>
+                                  ))
+                                )}
                               </div>
                             </div>
 
-                            {/* Totals Summary */}
-                            {(() => {
-                              const calc = getTotals(activeOrder);
-                              return (
-                                <div style={styles.billingSummary}>
-                                  <div style={styles.billCalcRow}>
-                                    <span>Subtotal</span>
-                                    <span>₹{calc.subtotal.toFixed(2)}</span>
-                                  </div>
-                                  <div style={styles.billCalcRow}>
-                                    <span>Taxes (GST {taxPercent}%)</span>
-                                    <span>₹{calc.tax.toFixed(2)}</span>
-                                  </div>
-                                  <div style={styles.billCalcRow}>
-                                    <span>Service Charge ({serviceChargePercent}%)</span>
-                                    <span>₹{calc.service.toFixed(2)}</span>
-                                  </div>
-                                  {calc.discount > 0 && (
-                                    <div style={{ ...styles.billCalcRow, color: '#ef4444' }}>
-                                      <span>Discount ({discountPercent}%)</span>
-                                      <span>-₹{calc.discount.toFixed(2)}</span>
-                                    </div>
-                                  )}
-                                  <div style={styles.billCalcRowTotal}>
-                                    <span>Total Bill</span>
-                                    <span>₹{calc.grand.toFixed(2)}</span>
-                                  </div>
+                            {/* Billing calculations */}
+                            <div style={styles.billingModifiers}>
+                              <h4 style={styles.detailsGroupTitle}>Bill Calculations</h4>
+                              
+                              <div style={styles.inputRow}>
+                                <div style={styles.modifierInputGroup}>
+                                  <Percent size={14} style={{ marginRight: '6px' }} />
+                                  <label style={styles.modifierLabel}>Discount (%)</label>
+                                  <input 
+                                    type="number" 
+                                    min="0" 
+                                    max="100" 
+                                    value={discountPercent} 
+                                    onChange={(e) => setDiscountPercent(Math.min(100, Math.max(0, parseInt(e.target.value) || 0)))}
+                                    style={styles.modifierInput}
+                                  />
+                                </div>
+                                <div style={styles.modifierInputGroup}>
+                                  <Percent size={14} style={{ marginRight: '6px' }} />
+                                  <label style={styles.modifierLabel}>Service Chg (%)</label>
+                                  <input 
+                                    type="number" 
+                                    min="0" 
+                                    max="100" 
+                                    value={serviceChargePercent} 
+                                    onChange={(e) => setServiceChargePercent(Math.min(100, Math.max(0, parseInt(e.target.value) || 0)))}
+                                    style={styles.modifierInput}
+                                  />
+                                </div>
+                              </div>
 
-                                  {/* Settlement Actions */}
-                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '16px' }}>
-                                    <button 
-                                      onClick={() => handleSettle(activeOrder.id, 'Cash')}
-                                      style={{ ...styles.settleButton, backgroundColor: '#10b981', color: '#ffffff' }}
-                                    >
-                                      Settle with Cash
-                                    </button>
-                                    <div style={{ display: 'flex', gap: '10px' }}>
-                                      <button 
-                                        onClick={() => handleSettle(activeOrder.id, 'Card')}
-                                        style={{ ...styles.settleButton, flex: 1, backgroundColor: 'rgba(255,255,255,0.05)', borderColor: 'rgba(255,255,255,0.1)' }}
+                              <div style={styles.billingSummary}>
+                                <div style={styles.billCalcRow}>
+                                  <span>Subtotal</span>
+                                  <span>₹{calc.subtotal.toFixed(2)}</span>
+                                </div>
+                                <div style={styles.billCalcRow}>
+                                  <span>Taxes (GST {taxPercent}%)</span>
+                                  <span>₹{calc.tax.toFixed(2)}</span>
+                                </div>
+                                <div style={styles.billCalcRow}>
+                                  <span>Service Charge ({serviceChargePercent}%)</span>
+                                  <span>₹{calc.service.toFixed(2)}</span>
+                                </div>
+                                {calc.discount > 0 && (
+                                  <div style={{ ...styles.billCalcRow, color: '#ef4444' }}>
+                                    <span>Discount ({discountPercent}%)</span>
+                                    <span>-₹{calc.discount.toFixed(2)}</span>
+                                  </div>
+                                )}
+                                <div style={styles.billCalcRowTotal}>
+                                  <span>Total Bill</span>
+                                  <span>₹{calc.grand.toFixed(2)}</span>
+                                </div>
+
+                                {/* Split Bill Calculator */}
+                                <div style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  padding: '8px 12px',
+                                  background: 'rgba(255,255,255,0.03)',
+                                  borderRadius: '8px',
+                                  marginTop: '12px',
+                                  border: '1px solid rgba(255,255,255,0.06)'
+                                }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <Users size={14} color="#a1a1aa" />
+                                    <span style={{ fontSize: '12px', color: '#a1a1aa' }}>Split (Guests):</span>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginLeft: '4px' }}>
+                                      <button
+                                        onClick={() => setSplitGuests(Math.max(1, splitGuests - 1))}
+                                        style={{ width: '22px', height: '22px', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(255,255,255,0.05)', color: '#fff', cursor: 'pointer' }}
                                       >
-                                        Settle Card
+                                        -
                                       </button>
-                                      <button 
-                                        onClick={() => handleSettle(activeOrder.id, 'UPI')}
-                                        style={{ ...styles.settleButton, flex: 1, backgroundColor: 'rgba(255,255,255,0.05)', borderColor: 'rgba(255,255,255,0.1)' }}
+                                      <span style={{ fontSize: '12px', fontWeight: 700, minWidth: '18px', textAlign: 'center' }}>{splitGuests}</span>
+                                      <button
+                                        onClick={() => setSplitGuests(splitGuests + 1)}
+                                        style={{ width: '22px', height: '22px', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(255,255,255,0.05)', color: '#fff', cursor: 'pointer' }}
                                       >
-                                        Settle UPI
+                                        +
                                       </button>
                                     </div>
+                                  </div>
+                                  <div style={{ textAlign: 'right' }}>
+                                    <span style={{ fontSize: '12px', fontWeight: 700, color: '#f59e0b' }}>
+                                      ₹{(calc.grand / splitGuests).toFixed(2)} / guest
+                                    </span>
                                   </div>
                                 </div>
-                              );
-                            })()}
+
+                                {/* Settlement Actions */}
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '16px' }}>
+                                  <button 
+                                    onClick={() => handleSettleAction('Cash')}
+                                    style={{ ...styles.settleButton, backgroundColor: '#10b981', color: '#ffffff' }}
+                                  >
+                                    Settle Tab with Cash (₹{calc.grand.toFixed(2)})
+                                  </button>
+                                  <div style={{ display: 'flex', gap: '10px' }}>
+                                    <button 
+                                      onClick={() => handleSettleAction('Card')}
+                                      style={{ ...styles.settleButton, flex: 1, backgroundColor: 'rgba(255,255,255,0.05)', borderColor: 'rgba(255,255,255,0.1)' }}
+                                    >
+                                      Settle Card
+                                    </button>
+                                    <button 
+                                      onClick={() => handleSettleAction('UPI')}
+                                      style={{ ...styles.settleButton, flex: 1, backgroundColor: 'rgba(255,255,255,0.05)', borderColor: 'rgba(255,255,255,0.1)' }}
+                                    >
+                                      Settle UPI
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          </>
+                        ) : (
+                          <div style={styles.emptySidebarBody}>
+                            <AlertCircle size={28} color="#71717a" />
+                            <p style={{ marginTop: '12px', fontSize: '13px', color: '#a1a1aa' }}>
+                              This table has no active orders on its tab yet. Customers can scan the QR code to order at any time.
+                            </p>
                           </div>
-                        </div>
-                      ) : (
-                        <div style={styles.emptySidebarBody}>
-                          <AlertCircle size={28} color="#71717a" />
-                          <p style={{ marginTop: '12px', fontSize: '13px', color: '#a1a1aa' }}>
-                            This table has no active order. Customers can scan the QR code to begin ordering.
-                          </p>
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </>
                   );
                 })()}
@@ -512,26 +823,17 @@ export const AdminView: React.FC = () => {
             <div style={styles.menuHeaderRow}>
               <h2 style={styles.tabSectionTitle}>Menu Management</h2>
               {!isAddingItem && (
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <button 
-                    onClick={resetMenuToDefault}
-                    style={{ ...styles.addMenuBtn, backgroundColor: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: '#d4d4d8' }}
-                  >
-                    <RefreshCw size={14} /> Re-sync 34 Default Items
-                  </button>
-                  <button 
-                    onClick={() => {
-                      setEditingItem(null);
-                      setIsAddingItem(true);
-                    }} 
-                    style={styles.addMenuBtn}
-                    className="shine-btn"
-                  >
-                    <Plus size={16} /> Add Menu Item
-                  </button>
-                </div>
+                <button 
+                  onClick={() => {
+                    setEditingItem(null);
+                    setIsAddingItem(true);
+                  }} 
+                  style={styles.addMenuBtn}
+                  className="shine-btn"
+                >
+                  <Plus size={16} /> Add Menu Item
+                </button>
               )}
-
             </div>
 
             {isAddingItem ? (
@@ -573,16 +875,11 @@ export const AdminView: React.FC = () => {
                       onChange={(e) => setItemCategory(e.target.value as MenuItem['category'])}
                       style={styles.select}
                     >
-                      <option value="Starters">Starters</option>
-                      <option value="Rice & Biryanis">Rice & Biryanis</option>
-                      <option value="Tandoori & Grills">Tandoori & Grills</option>
-                      <option value="Chef Specials">Chef Specials</option>
-                      <option value="Main Course">Main Course</option>
+                      <option value="Appetizers">Appetizers</option>
+                      <option value="Mains">Mains</option>
                       <option value="Desserts">Desserts</option>
                       <option value="Beverages">Beverages</option>
-
                     </select>
-
                   </div>
                   <div style={{ ...styles.formGroup, flex: 1 }}>
                     <label style={styles.label}>Dietary Marker</label>
@@ -1352,6 +1649,7 @@ const styles: Record<string, React.CSSProperties> = {
   }
 };
 
+// Add standard keyframes for pulsing border billing request alerts
 if (typeof document !== 'undefined') {
   const styleSheet = document.createElement('style');
   styleSheet.type = 'text/css';

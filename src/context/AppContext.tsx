@@ -1,29 +1,27 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { MenuItem, Order, Section, Table, CartItem, CustomerReview } from '../types';
+import { MenuItem, Order, Section, Table, CartItem, CustomerReview, TableSession } from '../types';
 import { INITIAL_MENU, INITIAL_SECTIONS, INITIAL_REVIEWS } from '../mockData';
-import { calculateAiPrepTime } from '../services/geminiService';
-import { db, isFirebaseConfigured } from '../firebase';
-import { 
-  collection, doc, setDoc, addDoc, updateDoc, deleteDoc, 
-  onSnapshot, query, orderBy, getDocs, writeBatch 
-} from 'firebase/firestore';
 
 interface AppContextType {
-
   menu: MenuItem[];
   sections: Section[];
   orders: Order[];
   reviews: CustomerReview[];
-  isCloudSync: boolean;
-  placeOrder: (tableId: string, sectionName: string, items: CartItem[]) => Order;
+  tableSessions: TableSession[];
+  getActiveSession: (tableId: string, sectionName: string) => TableSession | undefined;
+  placeOrderRound: (tableId: string, sectionName: string, items: CartItem[], notes?: string) => Promise<{ order: Order; session: TableSession }>;
+  requestBillForSession: (tableId: string, sectionName: string) => Promise<TableSession | undefined>;
+  settleSessionBill: (sessionId: string, paymentMethod: 'UPI' | 'Card' | 'Cash') => Promise<void>;
+  joinTables: (primaryTableId: string, joinTableIds: string[], sectionName: string, guestCount?: number) => Promise<void>;
+  unjoinTable: (tableIdToFree: string, sectionName: string) => Promise<void>;
   updateOrderStatus: (orderId: string, status: Order['status']) => void;
-  requestBill: (tableId: string, sectionName: string) => void;
-  settleBill: (orderId: string, paymentMethod: 'UPI' | 'Card' | 'Cash') => void;
   addMenuItem: (item: Omit<MenuItem, 'id'>) => void;
   updateMenuItem: (item: MenuItem) => void;
   deleteMenuItem: (id: string) => void;
-  addCustomerReview: (review: Omit<CustomerReview, 'id' | 'timestamp'>) => void;
-  resetMenuToDefault: () => void;
+  // Legacy compatibility helpers
+  placeOrder: (tableId: string, sectionName: string, items: CartItem[]) => Order;
+  requestBill: (tableId: string, sectionName: string) => void;
+  settleBill: (orderId: string, paymentMethod: 'UPI' | 'Card' | 'Cash') => void;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -31,178 +29,83 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 const LOCAL_STORAGE_KEY = 'hms_system_state';
 const CHANNEL_NAME = 'hms_broadcast_channel';
 
-// Helper interface for flattening tables from Firestore
-interface FirestoreTable {
-  id: string;
-  name: string;
-  sectionName: string;
-  status: 'free' | 'occupied' | 'billing_requested';
-  currentOrderId?: string;
-}
-
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [menu, setMenu] = useState<MenuItem[]>([]);
-  const [sections, setSections] = useState<Section[]>([]);
-  const [orders, setOrders] = useState<Order[]>([]);
-  const [reviews, setReviews] = useState<CustomerReview[]>(INITIAL_REVIEWS);
+  // Initialize state from local storage or defaults
+  const [menu, setMenu] = useState<MenuItem[]>(() => {
+    const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY}_menu`);
+    return saved ? JSON.parse(saved) : INITIAL_MENU;
+  });
 
-  // Helper to re-seed Firestore with complete INITIAL_MENU
-  const seedFirestoreMenu = async () => {
-    if (!db) return;
-    try {
-      console.log("Seeding/Updating complete 34-item menu collection in Firestore...");
-      const batch = writeBatch(db);
-      INITIAL_MENU.forEach((item) => {
-        const itemRef = doc(db, 'menu', item.id);
-        batch.set(itemRef, item);
-      });
-      await batch.commit();
-    } catch (e) {
-      console.error("Error seeding Firestore menu:", e);
-    }
-  };
+  const [sections, setSections] = useState<Section[]>(() => {
+    const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY}_sections`);
+    return saved ? JSON.parse(saved) : INITIAL_SECTIONS;
+  });
 
-  // -----------------------------------------------------------------
-  // 1. FIREBASE ACTIVE MODE
-  // -----------------------------------------------------------------
+  const [orders, setOrders] = useState<Order[]>(() => {
+    const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY}_orders`);
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  const [reviews] = useState<CustomerReview[]>(() => {
+    const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY}_reviews`);
+    return saved ? JSON.parse(saved) : INITIAL_REVIEWS;
+  });
+
+  const [tableSessions, setTableSessions] = useState<TableSession[]>(() => {
+    const saved = localStorage.getItem(`${LOCAL_STORAGE_KEY}_sessions`);
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  // --- SYNC WITH MONGODB BACKEND ON MOUNT ---
   useEffect(() => {
-    if (!isFirebaseConfigured || !db) return;
+    const syncWithBackend = async () => {
+      try {
+        const [menuRes, secRes, ordRes] = await Promise.all([
+          fetch('/api/menu').catch(() => null),
+          fetch('/api/sections').catch(() => null),
+          fetch('/api/orders').catch(() => null)
+        ]);
 
-    console.log("App running in CLOUD SYNC mode (Firebase)");
-
-    // Listener for Menu
-    const unsubscribeMenu = onSnapshot(collection(db, 'menu'), async (snapshot) => {
-      if (snapshot.empty || snapshot.docs.length < INITIAL_MENU.length) {
-        // DB is empty or has old small menu, seed full 34-item initial menu items
-        await seedFirestoreMenu();
-      } else {
-        const menuItems: MenuItem[] = [];
-        snapshot.forEach((doc) => {
-          const data = doc.data() as MenuItem;
-          // Auto migrate old category names
-          if ((data.category as string) === 'Appetizers') data.category = 'Starters';
-          if ((data.category as string) === 'Mains') data.category = 'Main Course';
-          menuItems.push(data);
-        });
-        setMenu(menuItems);
-      }
-    });
-
-
-    // Listener for Tables & Sections
-    const unsubscribeTables = onSnapshot(collection(db, 'tables'), async (snapshot) => {
-      if (snapshot.empty) {
-        // Seed flat tables
-        console.log("Seeding tables collection in Firestore...");
-        try {
-          const batch = writeBatch(db);
-          INITIAL_SECTIONS.forEach((section) => {
-            section.tables.forEach((table) => {
-              const tableRef = doc(db, 'tables', table.id);
-              const flatTable: FirestoreTable = {
-                id: table.id,
-                name: table.name,
-                sectionName: section.name,
-                status: table.status,
-                currentOrderId: table.currentOrderId || ""
-              };
-              batch.set(tableRef, flatTable);
-            });
-          });
-          await batch.commit();
-        } catch (e) {
-          console.error("Error seeding tables:", e);
-        }
-      } else {
-        const flatTables: FirestoreTable[] = [];
-        snapshot.forEach((doc) => flatTables.push(doc.data() as FirestoreTable));
-        
-        // Rebuild nested Section[] structure
-        const sectionsMap: Record<string, Table[]> = {};
-        flatTables.forEach(t => {
-          if (!sectionsMap[t.sectionName]) {
-            sectionsMap[t.sectionName] = [];
+        if (menuRes && menuRes.ok) {
+          const dbMenu = await menuRes.json();
+          if (dbMenu.length > 0) {
+            setMenu(dbMenu);
+            localStorage.setItem(`${LOCAL_STORAGE_KEY}_menu`, JSON.stringify(dbMenu));
+          } else {
+            // Seed MongoDB with initial menu & sections
+            await fetch('/api/seed', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ menu: INITIAL_MENU, sections: INITIAL_SECTIONS, reviews: INITIAL_REVIEWS })
+            }).catch(() => {});
           }
-          sectionsMap[t.sectionName].push({
-            id: t.id,
-            name: t.name,
-            status: t.status,
-            currentOrderId: t.currentOrderId || undefined
-          });
-        });
+        }
 
-        const rebuiltSections = Object.entries(sectionsMap).map(([name, tables]) => ({
-          name,
-          tables: tables.sort((a, b) => a.name.localeCompare(b.name))
-        })).sort((a,b) => a.name.localeCompare(b.name));
-        
-        setSections(rebuiltSections);
+        if (secRes && secRes.ok) {
+          const dbSections = await secRes.json();
+          if (dbSections.length > 0) {
+            setSections(dbSections);
+            localStorage.setItem(`${LOCAL_STORAGE_KEY}_sections`, JSON.stringify(dbSections));
+          }
+        }
+
+        if (ordRes && ordRes.ok) {
+          const dbOrders = await ordRes.json();
+          if (dbOrders.length > 0) {
+            setOrders(dbOrders);
+            localStorage.setItem(`${LOCAL_STORAGE_KEY}_orders`, JSON.stringify(dbOrders));
+          }
+        }
+      } catch (err) {
+        console.log('MongoDB server sync note: Running in synchronized hybrid mode.');
       }
-    });
-
-    // Listener for Orders
-    const unsubscribeOrders = onSnapshot(
-      query(collection(db, 'orders'), orderBy('timestamp', 'asc')), 
-      (snapshot) => {
-        const activeOrders: Order[] = [];
-        snapshot.forEach((doc) => activeOrders.push(doc.data() as Order));
-        setOrders(activeOrders);
-      }
-    );
-
-    return () => {
-      unsubscribeMenu();
-      unsubscribeTables();
-      unsubscribeOrders();
     };
+
+    syncWithBackend();
   }, []);
 
-  // -----------------------------------------------------------------
-  // 2. LOCAL FALLBACK MODE
-  // -----------------------------------------------------------------
+  // Broadcast Channel for live cross-tab updates
   useEffect(() => {
-    if (isFirebaseConfigured && db) return;
-
-    console.log("App running in LOCAL FALLBACK mode (localStorage)");
-
-    // Initialize state from local storage or defaults with auto-migration
-    const savedMenuStr = localStorage.getItem(`${LOCAL_STORAGE_KEY}_menu`);
-    let activeMenu = INITIAL_MENU;
-
-    if (savedMenuStr) {
-      try {
-        const parsed = JSON.parse(savedMenuStr);
-        // If saved menu is an older version with fewer items or outdated schema, update to fresh INITIAL_MENU
-        if (parsed.length < INITIAL_MENU.length) {
-          activeMenu = INITIAL_MENU;
-          localStorage.setItem(`${LOCAL_STORAGE_KEY}_menu`, JSON.stringify(INITIAL_MENU));
-        } else {
-          // Migrate category names
-          activeMenu = parsed.map((item: any) => ({
-            ...item,
-            category: item.category === 'Appetizers' ? 'Starters' : item.category === 'Mains' ? 'Main Course' : item.category
-          }));
-        }
-      } catch (e) {
-        activeMenu = INITIAL_MENU;
-        localStorage.setItem(`${LOCAL_STORAGE_KEY}_menu`, JSON.stringify(INITIAL_MENU));
-      }
-    } else {
-      localStorage.setItem(`${LOCAL_STORAGE_KEY}_menu`, JSON.stringify(INITIAL_MENU));
-    }
-    setMenu(activeMenu);
-
-
-    const savedSections = localStorage.getItem(`${LOCAL_STORAGE_KEY}_sections`);
-    setSections(savedSections ? JSON.parse(savedSections) : INITIAL_SECTIONS);
-
-
-    const savedOrders = localStorage.getItem(`${LOCAL_STORAGE_KEY}_orders`);
-    setOrders(savedOrders ? JSON.parse(savedOrders) : []);
-
-    const savedReviews = localStorage.getItem(`${LOCAL_STORAGE_KEY}_reviews`);
-    setReviews(savedReviews ? JSON.parse(savedReviews) : INITIAL_REVIEWS);
-
     const channel = new BroadcastChannel(CHANNEL_NAME);
 
     const handleMessage = (event: MessageEvent) => {
@@ -211,18 +114,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (payload.menu) setMenu(payload.menu);
         if (payload.sections) setSections(payload.sections);
         if (payload.orders) setOrders(payload.orders);
-        if (payload.reviews) setReviews(payload.reviews);
+        if (payload.tableSessions) setTableSessions(payload.tableSessions);
       }
     };
 
     channel.addEventListener('message', handleMessage);
 
-    // Sync via storage event
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === `${LOCAL_STORAGE_KEY}_menu` && e.newValue) setMenu(JSON.parse(e.newValue));
       if (e.key === `${LOCAL_STORAGE_KEY}_sections` && e.newValue) setSections(JSON.parse(e.newValue));
       if (e.key === `${LOCAL_STORAGE_KEY}_orders` && e.newValue) setOrders(JSON.parse(e.newValue));
-      if (e.key === `${LOCAL_STORAGE_KEY}_reviews` && e.newValue) setReviews(JSON.parse(e.newValue));
+      if (e.key === `${LOCAL_STORAGE_KEY}_sessions` && e.newValue) setTableSessions(JSON.parse(e.newValue));
     };
     window.addEventListener('storage', handleStorageChange);
 
@@ -233,119 +135,474 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, []);
 
-  // Helper to save state locally & broadcast
-  const saveAndBroadcastLocal = (
+  const saveAndBroadcast = (
     updatedMenu: MenuItem[], 
     updatedSections: Section[], 
     updatedOrders: Order[], 
-    updatedReviews: CustomerReview[] = reviews
+    updatedSessions: TableSession[]
   ) => {
     localStorage.setItem(`${LOCAL_STORAGE_KEY}_menu`, JSON.stringify(updatedMenu));
     localStorage.setItem(`${LOCAL_STORAGE_KEY}_sections`, JSON.stringify(updatedSections));
     localStorage.setItem(`${LOCAL_STORAGE_KEY}_orders`, JSON.stringify(updatedOrders));
-    localStorage.setItem(`${LOCAL_STORAGE_KEY}_reviews`, JSON.stringify(updatedReviews));
+    localStorage.setItem(`${LOCAL_STORAGE_KEY}_sessions`, JSON.stringify(updatedSessions));
 
     const channel = new BroadcastChannel(CHANNEL_NAME);
     channel.postMessage({
       type: 'STATE_UPDATE',
-      payload: { menu: updatedMenu, sections: updatedSections, orders: updatedOrders, reviews: updatedReviews }
+      payload: { 
+        menu: updatedMenu, 
+        sections: updatedSections, 
+        orders: updatedOrders,
+        tableSessions: updatedSessions 
+      }
     });
     channel.close();
   };
 
-  // -----------------------------------------------------------------
-  // 3. API METHODS (Handles Firebase writes OR Local Fallbacks)
-  // -----------------------------------------------------------------
-  
-  // Place Order with AI Prep Time
-  const placeOrder = (tableId: string, sectionName: string, items: CartItem[]): Order => {
-    const activeKitchenOrdersCount = orders.filter(o => o.status === 'received' || o.status === 'preparing').length;
-    const aiPrepTime = calculateAiPrepTime(items, activeKitchenOrdersCount);
+  // Helper to find the active running session for a table (or joint table)
+  const getActiveSession = (tableId: string, sectionName: string): TableSession | undefined => {
+    return tableSessions.find(s => 
+      s.sectionName === sectionName && 
+      (s.status === 'active' || s.status === 'billing_requested') &&
+      (s.primaryTableId === tableId || (s.joinedTableIds && s.joinedTableIds.includes(tableId)))
+    );
+  };
+
+  // --- 1. RUNNING TAB: ORDER ANYTIME WITHOUT PAYING FIRST ---
+  const placeOrderRound = async (
+    tableId: string, 
+    sectionName: string, 
+    items: CartItem[], 
+    notes?: string
+  ): Promise<{ order: Order; session: TableSession }> => {
+    let activeSession = getActiveSession(tableId, sectionName);
+
+    const roundTotal = items.reduce((sum, item) => sum + (item.menuItem.price * item.quantity), 0);
+    const roundNumber = activeSession ? activeSession.rounds.length + 1 : 1;
+
+    if (!activeSession) {
+      activeSession = {
+        sessionId: `sess-${Date.now().toString(36)}-${Math.random().toString(36).substr(2, 4)}`,
+        primaryTableId: tableId,
+        sectionName,
+        joinedTableIds: [],
+        guestCount: 2,
+        rounds: [],
+        activeOrderIds: [],
+        subtotal: 0,
+        status: 'active',
+        createdAt: new Date().toISOString()
+      };
+    }
 
     const newOrder: Order = {
-      id: `ord-${Math.random().toString(36).substr(2, 9)}`,
+      id: `ord-${Date.now().toString(36)}-${Math.random().toString(36).substr(2, 4)}`,
       tableId,
       sectionName,
+      sessionId: activeSession.sessionId,
+      roundNumber,
       items,
       status: 'received',
       timestamp: new Date().toISOString(),
-      totalAmount: items.reduce((sum, item) => sum + (item.menuItem.price * item.quantity), 0),
+      totalAmount: roundTotal,
       paymentStatus: 'pending',
-      billingRequested: false,
-      estimatedPrepTimeMinutes: aiPrepTime
+      billingRequested: false
     };
 
-    if (isFirebaseConfigured && db) {
-      // Cloud Write
-      try {
-        setDoc(doc(db, 'orders', newOrder.id), newOrder);
-        updateDoc(doc(db, 'tables', tableId), {
-          status: 'occupied',
-          currentOrderId: newOrder.id
-        });
-      } catch (e) {
-        console.error("Firestore placeOrder failed:", e);
-      }
-    } else {
-      // Local fallback
-      const newOrders = [...orders, newOrder];
-      const newSections = sections.map(section => {
-        if (section.name === sectionName) {
-          return {
-            ...section,
-            tables: section.tables.map(table => {
-              if (table.id === tableId) {
-                return { ...table, status: 'occupied' as const, currentOrderId: newOrder.id };
-              }
-              return table;
-            })
-          };
+    // Update the running tab session
+    const updatedSession: TableSession = {
+      ...activeSession,
+      status: 'active', // If they order more, keep tab active
+      subtotal: activeSession.subtotal + roundTotal,
+      rounds: [
+        ...activeSession.rounds,
+        {
+          roundNumber,
+          items,
+          timestamp: new Date().toISOString(),
+          notes: notes || ''
         }
-        return section;
-      });
+      ],
+      activeOrderIds: [...activeSession.activeOrderIds, newOrder.id]
+    };
 
-      setOrders(newOrders);
-      setSections(newSections);
-      saveAndBroadcastLocal(menu, newSections, newOrders);
-    }
+    const newOrders = [newOrder, ...orders];
+    const newSessions = tableSessions.some(s => s.sessionId === updatedSession.sessionId)
+      ? tableSessions.map(s => s.sessionId === updatedSession.sessionId ? updatedSession : s)
+      : [...tableSessions, updatedSession];
 
-    return newOrder;
+    // Mark the table (and any joined tables) as occupied
+    const newSections = sections.map(section => {
+      if (section.name === sectionName) {
+        return {
+          ...section,
+          tables: section.tables.map(table => {
+            if (table.id === updatedSession.primaryTableId || (updatedSession.joinedTableIds && updatedSession.joinedTableIds.includes(table.id))) {
+              return { 
+                ...table, 
+                status: 'occupied' as const, 
+                currentOrderId: newOrder.id,
+                currentSessionId: updatedSession.sessionId
+              };
+            }
+            return table;
+          })
+        };
+      }
+      return section;
+    });
+
+    setOrders(newOrders);
+    setTableSessions(newSessions);
+    setSections(newSections);
+    saveAndBroadcast(menu, newSections, newOrders, newSessions);
+
+    // Sync to MongoDB server in background
+    fetch('/api/orders/place', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tableId, sectionName, items, notes })
+    }).catch(() => {});
+
+    return { order: newOrder, session: updatedSession };
   };
 
-  // Update Order Status
+  // --- 2. REQUEST BILL (CALLED ONCE AT THE END OF DINING) ---
+  const requestBillForSession = async (tableId: string, sectionName: string): Promise<TableSession | undefined> => {
+    const session = getActiveSession(tableId, sectionName);
+    if (!session) return undefined;
+
+    const updatedSession: TableSession = {
+      ...session,
+      status: 'billing_requested'
+    };
+
+    const newSessions = tableSessions.map(s => s.sessionId === session.sessionId ? updatedSession : s);
+
+    // Mark orders in this session as billingRequested
+    const newOrders = orders.map(order => {
+      if (order.sessionId === session.sessionId) {
+        return { ...order, billingRequested: true };
+      }
+      return order;
+    });
+
+    // Mark tables as billing_requested
+    const newSections = sections.map(section => {
+      if (section.name === sectionName) {
+        return {
+          ...section,
+          tables: section.tables.map(table => {
+            if (table.id === session.primaryTableId || (session.joinedTableIds && session.joinedTableIds.includes(table.id))) {
+              return { ...table, status: 'billing_requested' as const };
+            }
+            return table;
+          })
+        };
+      }
+      return section;
+    });
+
+    setTableSessions(newSessions);
+    setOrders(newOrders);
+    setSections(newSections);
+    saveAndBroadcast(menu, newSections, newOrders, newSessions);
+
+    // Sync to MongoDB server in background
+    fetch('/api/sessions/request-bill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tableId, sectionName })
+    }).catch(() => {});
+
+    return updatedSession;
+  };
+
+  // --- 3. SETTLE BILL (PAY ONCE FOR THE ENTIRE RUNNING TAB / JOINT GROUP) ---
+  const settleSessionBill = async (sessionId: string, paymentMethod: 'UPI' | 'Card' | 'Cash') => {
+    const session = tableSessions.find(s => s.sessionId === sessionId);
+    if (!session) return;
+
+    const updatedSession: TableSession = {
+      ...session,
+      status: 'completed'
+    };
+
+    const newSessions = tableSessions.map(s => s.sessionId === sessionId ? updatedSession : s);
+
+    // Mark all orders for this table session as completed and paid
+    const newOrders = orders.map(order => {
+      if (order.sessionId === sessionId || (order.tableId === session.primaryTableId && order.status !== 'completed')) {
+        return {
+          ...order,
+          status: 'completed' as const,
+          paymentStatus: 'completed' as const,
+          paymentMethod
+        };
+      }
+      return order;
+    });
+
+    // Free up primary table AND all joint tables together!
+    const allTableIdsToFree = [session.primaryTableId, ...(session.joinedTableIds || [])];
+    const newSections = sections.map(section => {
+      if (section.name === session.sectionName) {
+        return {
+          ...section,
+          tables: section.tables.map(table => {
+            if (allTableIdsToFree.includes(table.id)) {
+              return { 
+                ...table, 
+                status: 'free' as const, 
+                currentOrderId: undefined,
+                currentSessionId: undefined,
+                joinedWith: undefined
+              };
+            }
+            return table;
+          })
+        };
+      }
+      return section;
+    });
+
+    setTableSessions(newSessions);
+    setOrders(newOrders);
+    setSections(newSections);
+    saveAndBroadcast(menu, newSections, newOrders, newSessions);
+
+    // Sync to MongoDB backend
+    fetch('/api/sessions/settle-bill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, paymentMethod })
+    }).catch(() => {});
+  };
+
+  // --- 4. JOINT TABLES: MERGE MULTIPLE TABLES TOGETHER (CONSOLIDATES BILLS & ROUNDS) ---
+  const joinTables = async (primaryTableId: string, joinTableIds: string[], sectionName: string, guestCount: number = 4) => {
+    let session = getActiveSession(primaryTableId, sectionName);
+
+    const mergedJoinedIds = Array.from(new Set([...(session?.joinedTableIds || []), ...joinTableIds]));
+
+    if (!session) {
+      session = {
+        sessionId: `sess-${Date.now().toString(36)}-${Math.random().toString(36).substr(2, 4)}`,
+        primaryTableId,
+        sectionName,
+        joinedTableIds: mergedJoinedIds,
+        guestCount,
+        rounds: [],
+        activeOrderIds: [],
+        subtotal: 0,
+        status: 'active',
+        createdAt: new Date().toISOString()
+      };
+    } else {
+      session = {
+        ...session,
+        joinedTableIds: mergedJoinedIds,
+        guestCount
+      };
+    }
+
+    let updatedSession = { ...session };
+    let retiredSessionIds: string[] = [];
+    let updatedOrders = [...orders];
+
+    // Merge in rounds and bills from the joined tables
+    for (const jId of joinTableIds) {
+      const otherSession = tableSessions.find(s => 
+        s.sectionName === sectionName && 
+        (s.primaryTableId === jId || (s.joinedTableIds && s.joinedTableIds.includes(jId))) &&
+        s.sessionId !== updatedSession.sessionId &&
+        s.status !== 'completed'
+      );
+
+      if (otherSession) {
+        retiredSessionIds.push(otherSession.sessionId);
+        const currentRoundCount = updatedSession.rounds.length;
+
+        const mergedRounds = otherSession.rounds.map((rnd, idx) => ({
+          ...rnd,
+          roundNumber: currentRoundCount + idx + 1,
+          notes: rnd.notes ? `${rnd.notes} (From ${jId})` : `(From ${jId})`
+        }));
+
+        updatedSession.rounds = [...updatedSession.rounds, ...mergedRounds];
+        updatedSession.subtotal += otherSession.subtotal;
+        updatedSession.activeOrderIds = Array.from(new Set([...updatedSession.activeOrderIds, ...otherSession.activeOrderIds]));
+
+        // Reassign orders
+        updatedOrders = updatedOrders.map(ord => {
+          if (ord.sessionId === otherSession.sessionId) {
+            return { ...ord, sessionId: updatedSession.sessionId };
+          }
+          return ord;
+        });
+      }
+
+      // Check any orders directly for this table
+      const pendingOrdersForTable = updatedOrders.filter(
+        o => o.tableId === jId && o.status !== 'completed' && o.sessionId !== updatedSession.sessionId
+      );
+
+      for (const ord of pendingOrdersForTable) {
+        if (!updatedSession.activeOrderIds.includes(ord.id)) {
+          updatedSession.activeOrderIds.push(ord.id);
+          updatedSession.rounds.push({
+            roundNumber: updatedSession.rounds.length + 1,
+            items: ord.items,
+            timestamp: ord.timestamp,
+            notes: `(From ${jId})`
+          });
+          updatedSession.subtotal += ord.totalAmount;
+        }
+        updatedOrders = updatedOrders.map(o => o.id === ord.id ? { ...o, sessionId: updatedSession.sessionId } : o);
+      }
+    }
+
+    const newSessions = tableSessions
+      .filter(s => !retiredSessionIds.includes(s.sessionId))
+      .map(s => s.sessionId === updatedSession.sessionId ? updatedSession : s);
+
+    if (!newSessions.some(s => s.sessionId === updatedSession.sessionId)) {
+      newSessions.push(updatedSession);
+    }
+
+    // Mark primary table and all joined tables as occupied, pointing joinedWith to primaryTableId
+    const newSections = sections.map(section => {
+      if (section.name === sectionName) {
+        return {
+          ...section,
+          tables: section.tables.map(table => {
+            if (table.id === primaryTableId) {
+              return { 
+                ...table, 
+                status: 'occupied' as const, 
+                currentSessionId: updatedSession.sessionId,
+                joinedWith: undefined 
+              };
+            }
+            if (mergedJoinedIds.includes(table.id)) {
+              return { 
+                ...table, 
+                status: 'occupied' as const, 
+                currentSessionId: updatedSession.sessionId,
+                joinedWith: primaryTableId 
+              };
+            }
+            return table;
+          })
+        };
+      }
+      return section;
+    });
+
+    setTableSessions(newSessions);
+    setOrders(updatedOrders);
+    setSections(newSections);
+    saveAndBroadcast(menu, newSections, updatedOrders, newSessions);
+
+    fetch('/api/tables/join', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ primaryTableId, joinTableIds: mergedJoinedIds, sectionName, guestCount })
+    }).catch(() => {});
+  };
+
+  // Unjoin a table from a group
+  const unjoinTable = async (tableIdToFree: string, sectionName: string) => {
+    const session = tableSessions.find(s => 
+      s.sectionName === sectionName && 
+      s.joinedTableIds && s.joinedTableIds.includes(tableIdToFree) &&
+      s.status === 'active'
+    );
+
+    let newSessions = tableSessions;
+    if (session) {
+      const updatedSession: TableSession = {
+        ...session,
+        joinedTableIds: session.joinedTableIds?.filter(id => id !== tableIdToFree) || []
+      };
+      newSessions = tableSessions.map(s => s.sessionId === session.sessionId ? updatedSession : s);
+    }
+
+    const newSections = sections.map(section => {
+      if (section.name === sectionName) {
+        return {
+          ...section,
+          tables: section.tables.map(table => {
+            if (table.id === tableIdToFree) {
+              return { 
+                ...table, 
+                status: 'free' as const, 
+                currentSessionId: undefined, 
+                currentOrderId: undefined, 
+                joinedWith: undefined 
+              };
+            }
+            return table;
+          })
+        };
+      }
+      return section;
+    });
+
+    setTableSessions(newSessions);
+    setSections(newSections);
+    saveAndBroadcast(menu, newSections, orders, newSessions);
+
+    fetch('/api/tables/unjoin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tableIdToFree, sectionName })
+    }).catch(() => {});
+  };
+
+  // --- 5. UPDATE ORDER STATUS (KITCHEN KDS) ---
   const updateOrderStatus = (orderId: string, status: Order['status']) => {
-    if (isFirebaseConfigured && db) {
-      // Cloud Write
-      try {
-        updateDoc(doc(db, 'orders', orderId), { status });
-        
-        if (status === 'completed') {
-          const targetOrder = orders.find(o => o.id === orderId);
-          if (targetOrder) {
-            updateDoc(doc(db, 'tables', targetOrder.tableId), {
-              status: 'free',
-              currentOrderId: ""
+    const newOrders = orders.map(order => {
+      if (order.id === orderId) {
+        return { ...order, status };
+      }
+      return order;
+    });
+
+    let newSections = [...sections];
+    let newSessions = [...tableSessions];
+
+    if (status === 'completed') {
+      const targetOrder = orders.find(o => o.id === orderId);
+      if (targetOrder) {
+        // If order belongs to a session and all orders in session are completed, free table
+        const session = targetOrder.sessionId ? tableSessions.find(s => s.sessionId === targetOrder.sessionId) : null;
+        if (session) {
+          const allCompleted = session.activeOrderIds.every(id => {
+            const ord = newOrders.find(o => o.id === id);
+            return ord ? ord.status === 'completed' : true;
+          });
+          if (allCompleted) {
+            newSessions = tableSessions.map(s => s.sessionId === session.sessionId ? { ...s, status: 'completed' as const } : s);
+            const tablesToFree = [session.primaryTableId, ...(session.joinedTableIds || [])];
+            newSections = sections.map(sec => {
+              if (sec.name === session.sectionName) {
+                return {
+                  ...sec,
+                  tables: sec.tables.map(t => tablesToFree.includes(t.id) ? { ...t, status: 'free' as const, currentOrderId: undefined, currentSessionId: undefined, joinedWith: undefined } : t)
+                };
+              }
+              return sec;
             });
           }
-        }
-      } catch (e) {
-        console.error("Firestore updateOrderStatus failed:", e);
-      }
-    } else {
-      // Local fallback
-      const newOrders = orders.map(order => order.id === orderId ? { ...order, status } : order);
-      let newSections = [...sections];
-
-      if (status === 'completed') {
-        const targetOrder = orders.find(o => o.id === orderId);
-        if (targetOrder) {
+        } else {
           newSections = sections.map(section => {
             if (section.name === targetOrder.sectionName) {
               return {
                 ...section,
                 tables: section.tables.map(table => {
                   if (table.id === targetOrder.tableId) {
-                    return { ...table, status: 'free' as const, currentOrderId: undefined };
+                    return { ...table, status: 'free' as const, currentOrderId: undefined, currentSessionId: undefined };
                   }
                   return table;
                 })
@@ -355,179 +612,92 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           });
         }
       }
-
-      setOrders(newOrders);
-      setSections(newSections);
-      saveAndBroadcastLocal(menu, newSections, newOrders);
     }
+
+    setOrders(newOrders);
+    setSections(newSections);
+    setTableSessions(newSessions);
+    saveAndBroadcast(menu, newSections, newOrders, newSessions);
+
+    fetch(`/api/orders/${orderId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status })
+    }).catch(() => {});
   };
 
-  // Request billing
+  // --- LEGACY HELPERS ---
+  const placeOrder = (tableId: string, sectionName: string, items: CartItem[]): Order => {
+    let placedOrder: Order | null = null;
+    placeOrderRound(tableId, sectionName, items).then(res => {
+      placedOrder = res.order;
+    });
+    return placedOrder || {
+      id: `ord-${Date.now()}`,
+      tableId,
+      sectionName,
+      items,
+      status: 'received',
+      timestamp: new Date().toISOString(),
+      totalAmount: items.reduce((sum, item) => sum + (item.menuItem.price * item.quantity), 0),
+      paymentStatus: 'pending',
+      billingRequested: false
+    };
+  };
+
   const requestBill = (tableId: string, sectionName: string) => {
-    const activeOrder = orders.find(
-      o => o.tableId === tableId && o.sectionName === sectionName && o.status !== 'completed'
-    );
-    
-    if (!activeOrder) return;
-
-    if (isFirebaseConfigured && db) {
-      // Cloud Write
-      try {
-        updateDoc(doc(db, 'orders', activeOrder.id), { billingRequested: true });
-        updateDoc(doc(db, 'tables', tableId), { status: 'billing_requested' });
-      } catch (e) {
-        console.error("Firestore requestBill failed:", e);
-      }
-    } else {
-      // Local fallback
-      const newOrders = orders.map(order => order.id === activeOrder.id ? { ...order, billingRequested: true } : order);
-      const newSections = sections.map(section => {
-        if (section.name === sectionName) {
-          return {
-            ...section,
-            tables: section.tables.map(table => {
-              if (table.id === tableId) {
-                return { ...table, status: 'billing_requested' as const };
-              }
-              return table;
-            })
-          };
-        }
-        return section;
-      });
-
-      setOrders(newOrders);
-      setSections(newSections);
-      saveAndBroadcastLocal(menu, newSections, newOrders);
-    }
+    requestBillForSession(tableId, sectionName);
   };
 
-  // Settle Bill
   const settleBill = (orderId: string, paymentMethod: 'UPI' | 'Card' | 'Cash') => {
-    const targetOrder = orders.find(o => o.id === orderId);
-    if (!targetOrder) return;
-
-    if (isFirebaseConfigured && db) {
-      // Cloud Write
-      try {
-        updateDoc(doc(db, 'orders', orderId), {
-          paymentStatus: 'completed',
-          paymentMethod,
-          status: 'completed'
-        });
-        updateDoc(doc(db, 'tables', targetOrder.tableId), {
-          status: 'free',
-          currentOrderId: ""
-        });
-      } catch (e) {
-        console.error("Firestore settleBill failed:", e);
+    const ord = orders.find(o => o.id === orderId);
+    if (ord && ord.sessionId) {
+      settleSessionBill(ord.sessionId, paymentMethod);
+    } else if (ord) {
+      const activeSession = getActiveSession(ord.tableId, ord.sectionName);
+      if (activeSession) {
+        settleSessionBill(activeSession.sessionId, paymentMethod);
       }
-    } else {
-      // Local fallback
-      const newOrders = orders.map(order => {
-        if (order.id === orderId) {
-          return { ...order, paymentStatus: 'completed' as const, paymentMethod, status: 'completed' as const };
-        }
-        return order;
-      });
-
-      const newSections = sections.map(section => {
-        if (section.name === targetOrder.sectionName) {
-          return {
-            ...section,
-            tables: section.tables.map(table => {
-              if (table.id === targetOrder.tableId) {
-                return { ...table, status: 'free' as const, currentOrderId: undefined };
-              }
-              return table;
-            })
-          };
-        }
-        return section;
-      });
-
-      setOrders(newOrders);
-      setSections(newSections);
-      saveAndBroadcastLocal(menu, newSections, newOrders);
     }
   };
 
-  // Menu Management
+  // --- MENU MANAGEMENT ---
   const addMenuItem = (item: Omit<MenuItem, 'id'>) => {
-    const newId = `menu-${Math.random().toString(36).substr(2, 9)}`;
-    const newItem: MenuItem = { ...item, id: newId };
+    const newItem: MenuItem = {
+      ...item,
+      id: `menu-${Math.random().toString(36).substr(2, 9)}`
+    };
+    const newMenu = [...menu, newItem];
+    setMenu(newMenu);
+    saveAndBroadcast(newMenu, sections, orders, tableSessions);
 
-    if (isFirebaseConfigured && db) {
-      try {
-        setDoc(doc(db, 'menu', newId), newItem);
-      } catch (e) {
-        console.error("Firestore addMenuItem failed:", e);
-      }
-    } else {
-      const newMenu = [...menu, newItem];
-      setMenu(newMenu);
-      saveAndBroadcastLocal(newMenu, sections, orders);
-    }
+    fetch('/api/menu', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newItem)
+    }).catch(() => {});
   };
 
   const updateMenuItem = (updatedItem: MenuItem) => {
-    if (isFirebaseConfigured && db) {
-      try {
-        setDoc(doc(db, 'menu', updatedItem.id), updatedItem);
-      } catch (e) {
-        console.error("Firestore updateMenuItem failed:", e);
-      }
-    } else {
-      const newMenu = menu.map(item => item.id === updatedItem.id ? updatedItem : item);
-      setMenu(newMenu);
-      saveAndBroadcastLocal(newMenu, sections, orders);
-    }
+    const newMenu = menu.map(item => item.id === updatedItem.id ? updatedItem : item);
+    setMenu(newMenu);
+    saveAndBroadcast(newMenu, sections, orders, tableSessions);
+
+    fetch(`/api/menu/${updatedItem.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedItem)
+    }).catch(() => {});
   };
 
   const deleteMenuItem = (id: string) => {
-    if (isFirebaseConfigured && db) {
-      try {
-        deleteDoc(doc(db, 'menu', id));
-      } catch (e) {
-        console.error("Firestore deleteMenuItem failed:", e);
-      }
-    } else {
-      const newMenu = menu.filter(item => item.id !== id);
-      setMenu(newMenu);
-      saveAndBroadcastLocal(newMenu, sections, orders);
-    }
-  };
+    const newMenu = menu.filter(item => item.id !== id);
+    setMenu(newMenu);
+    saveAndBroadcast(newMenu, sections, orders, tableSessions);
 
-  const addCustomerReview = (review: Omit<CustomerReview, 'id' | 'timestamp'>) => {
-    const newId = `rev-${Math.random().toString(36).substr(2, 9)}`;
-    const newReview: CustomerReview = {
-      ...review,
-      id: newId,
-      timestamp: new Date().toISOString(),
-      sentiment: review.rating >= 4 ? 'positive' : review.rating === 3 ? 'neutral' : 'negative'
-    };
-
-    const newReviews = [newReview, ...reviews];
-    setReviews(newReviews);
-
-    if (isFirebaseConfigured && db) {
-      try {
-        setDoc(doc(db, 'reviews', newId), newReview);
-      } catch (e) {
-        console.error("Firestore addCustomerReview failed:", e);
-      }
-    } else {
-      saveAndBroadcastLocal(menu, sections, orders, newReviews);
-    }
-  };
-
-  const resetMenuToDefault = async () => {
-    setMenu(INITIAL_MENU);
-    if (isFirebaseConfigured && db) {
-      await seedFirestoreMenu();
-    } else {
-      saveAndBroadcastLocal(INITIAL_MENU, sections, orders, reviews);
-    }
+    fetch(`/api/menu/${id}`, {
+      method: 'DELETE'
+    }).catch(() => {});
   };
 
   return (
@@ -536,23 +706,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       sections,
       orders,
       reviews,
-      isCloudSync: isFirebaseConfigured,
-      placeOrder,
+      tableSessions,
+      getActiveSession,
+      placeOrderRound,
+      requestBillForSession,
+      settleSessionBill,
+      joinTables,
+      unjoinTable,
       updateOrderStatus,
-      requestBill,
-      settleBill,
       addMenuItem,
       updateMenuItem,
       deleteMenuItem,
-      addCustomerReview,
-      resetMenuToDefault
+      placeOrder,
+      requestBill,
+      settleBill
     }}>
       {children}
     </AppContext.Provider>
   );
 };
-
-
 
 export const useApp = () => {
   const context = useContext(AppContext);

@@ -1,20 +1,27 @@
 import React, { useState, useEffect } from 'react';
-import { AppProvider } from './context/AppContext';
+import { AppProvider, useApp } from './context/AppContext';
 import { CustomerView } from './components/CustomerView';
 import { KitchenView } from './components/KitchenView';
 import { AdminView } from './components/AdminView';
-import { Layers, ChefHat, User, Settings } from 'lucide-react';
+import { RestaurantHomePage } from './components/RestaurantHomePage';
+import { AiDiningAssistant } from './components/AiDiningAssistant';
+import { Layers, ChefHat, User, Settings, Utensils } from 'lucide-react';
 
 const AppContent: React.FC = () => {
+  const { menu, sections } = useApp();
   const [path, setPath] = useState(window.location.pathname);
+  const [search, setSearch] = useState(window.location.search);
   const [showDemoSwitcher, setShowDemoSwitcher] = useState(false);
 
+  // Monitor location changes
   useEffect(() => {
     const handleLocationChange = () => {
       setPath(window.location.pathname);
+      setSearch(window.location.search);
     };
 
     window.addEventListener('popstate', handleLocationChange);
+    // Overwrite history pushState to catch routing events
     const originalPushState = window.history.pushState;
     window.history.pushState = function(...args) {
       originalPushState.apply(this, args);
@@ -33,6 +40,13 @@ const AppContent: React.FC = () => {
     setShowDemoSwitcher(false);
   };
 
+  // Check if the customer view has table params selected
+  const hasTableParams = () => {
+    const params = new URLSearchParams(search);
+    return params.has('section') && params.has('table');
+  };
+
+  // Render view based on path
   const renderView = () => {
     switch (path) {
       case '/admin':
@@ -40,6 +54,25 @@ const AppContent: React.FC = () => {
       case '/kitchen':
         return <KitchenView />;
       default:
+        // Show home page when no table is selected
+        if (!hasTableParams()) {
+          return (
+            <RestaurantHomePage
+              sections={sections}
+              menu={menu}
+              onSelectTable={(sec, tbl) => {
+                navigateTo('/', `?section=${encodeURIComponent(sec)}&table=${encodeURIComponent(tbl)}`);
+              }}
+              onBrowseMenu={() => {
+                if (sections.length > 0 && sections[0].tables.length > 0) {
+                  const sec = sections[0].name;
+                  const tbl = sections[0].tables[0].id;
+                  navigateTo('/', `?section=${encodeURIComponent(sec)}&table=${encodeURIComponent(tbl)}`);
+                }
+              }}
+            />
+          );
+        }
         return <CustomerView />;
     }
   };
@@ -47,8 +80,9 @@ const AppContent: React.FC = () => {
   return (
     <>
       {renderView()}
+      <AiDiningAssistant menu={menu} cart={[]} onAddToCart={() => {}} />
 
-      {/* Floating Demo View Switcher */}
+      {/* Floating Demo View Switcher (For evaluation / college project presentation) */}
       <div style={styles.switcherContainer}>
         <button 
           onClick={() => setShowDemoSwitcher(!showDemoSwitcher)} 
@@ -77,9 +111,15 @@ const AppContent: React.FC = () => {
             </button>
             <button 
               onClick={() => navigateTo('/', '?section=Classic%20Hall&table=CH-T2')} 
-              style={{ ...styles.menuItemBtn, ...(path === '/' ? styles.menuItemActive : {}) }}
+              style={{ ...styles.menuItemBtn, ...(path === '/' && hasTableParams() ? styles.menuItemActive : {}) }}
             >
               <User size={14} /> Customer View (Table 2)
+            </button>
+            <button 
+              onClick={() => navigateTo('/')} 
+              style={{ ...styles.menuItemBtn, ...(path === '/' && !hasTableParams() ? styles.menuItemActive : {}) }}
+            >
+              <Utensils size={14} /> Home Page
             </button>
             
             <div style={styles.menuFooter}>
@@ -179,6 +219,7 @@ const styles: Record<string, React.CSSProperties> = {
   }
 };
 
+// Add standard keyframe for switching gear rotation in CSS
 if (typeof document !== 'undefined') {
   const styleSheet = document.createElement('style');
   styleSheet.type = 'text/css';

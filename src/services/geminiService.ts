@@ -85,7 +85,7 @@ export async function askGeminiChatbot(
     const menuContext = menu.map(m => `- ${m.name} (${m.category}, ₹${m.price}, ${m.isVeg ? 'Veg' : 'Non-Veg'}): ${m.description}`).join('\n');
     const cartContext = cart.length > 0 ? `Current Cart: ${cart.map(c => c.menuItem.name).join(', ')}` : 'Cart is currently empty.';
     
-    const prompt = `You are "Gemini Gourmet", an expert AI Culinary Assistant for "The Velvet Fork" fine dining restaurant.
+    const prompt = `You are "Velvet Fork AI", an expert AI Culinary Assistant for "The Velvet Fork" fine dining restaurant.
 User Question: "${userQuery}"
 
 Restaurant Menu:

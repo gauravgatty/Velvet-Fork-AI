@@ -404,7 +404,8 @@ const styles: Record<string, React.CSSProperties> = {
   }
 };
 
-// Inject keyframe spinner
+// Inline animations keyframe setup inside style block isn't possible, 
+// so we'll make sure it's referenced in css or we inject keyframe.
 if (typeof document !== 'undefined') {
   const styleSheet = document.createElement('style');
   styleSheet.type = 'text/css';
@@ -416,4 +417,3 @@ if (typeof document !== 'undefined') {
   `;
   document.head.appendChild(styleSheet);
 }
-export default MockPayment;
